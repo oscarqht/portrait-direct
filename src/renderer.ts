@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { type Calibration, type Profile, profiles, opticalUniforms, viewOffset } from './calibration';
+import {createGlassEnvironment} from './glass';
 export type OutputMode = 'hologram' | 'quilt' | 'test' | 'preview';
 // Original, single-pass lenticular interlacer. RGB channels sample their own view.
 // Tile coordinates are clamped by half a texel to avoid bleeding adjacent views.
@@ -59,6 +60,8 @@ export class PortraitRenderer {
   private plane = new THREE.PlaneGeometry(2,2);
   private profile: Profile = 'balanced';
   private calibration: Calibration | null = null;
+  private glassEnvironment:THREE.WebGLRenderTarget|undefined;
+  private resetEnvironment=()=>{this.glassEnvironment?.dispose();this.glassEnvironment=undefined;};
   frames = 0;
   lastSubmitMs = 0;
   constructor(readonly canvas: HTMLCanvasElement) {
@@ -77,6 +80,7 @@ export class PortraitRenderer {
     });
     this.blit.add(new THREE.Mesh(this.plane, this.material));
     this.configure('balanced', null);
+    canvas.addEventListener('webglcontextrestored',this.resetEnvironment);
   }
   configure(profile: Profile, calibration: Calibration | null) {
     if (!profiles[profile]) throw new Error('Unsupported quality profile.');
@@ -96,6 +100,24 @@ export class PortraitRenderer {
     const begin = performance.now();
     if (this.canvas.width !== width || this.canvas.height !== height) this.renderer.setSize(width,height,false);
     const r=this.renderer, p=profiles[this.profile], count=p.rows*p.columns;
+    if(scene.userData.portraitGlass) {
+      this.glassEnvironment??=createGlassEnvironment(r);
+      this.glassEnvironment.texture.userData.portraitRendererOwned=true;
+      if(scene.environment!==this.glassEnvironment.texture) {
+        scene.environment=this.glassEnvironment.texture;
+        // Keep diffuse props pastel; only glass receives full studio softboxes.
+        // Three uses scene intensity when a material has no explicit envMap.
+        scene.environmentIntensity=.08;
+        scene.traverse(object=>{
+          if(!(object instanceof THREE.Mesh))return;
+          for(const material of Array.isArray(object.material)?object.material:[object.material]) {
+            if(material instanceof THREE.MeshPhysicalMaterial&&material.transmission>0) {
+              material.envMap=this.glassEnvironment!.texture;material.needsUpdate=true;
+            }
+          }
+        });
+      }
+    }
     const camera=this.camera, distance=10/zoom;
     scene.updateMatrixWorld(true);
     const oldAuto=scene.matrixWorldAutoUpdate; scene.matrixWorldAutoUpdate=false;
@@ -118,6 +140,11 @@ export class PortraitRenderer {
           const x=preview?0:(i%p.columns)*p.tileW, y=preview?0:Math.floor(i/p.columns)*p.tileH;
           const w=preview?width:p.tileW, h=preview?height:p.tileH;
           r.setViewport(x,y,w,h);
+          if(!preview) {
+            // Mesh transmission switches targets internally. Restore this tile,
+            // rather than the full quilt, when Three returns from refraction.
+            this.target.viewport.set(x,y,w,h);this.target.scissor.set(x,y,w,h);this.target.scissorTest=true;
+          }
           // A scene background can force a clear despite autoClear=false.
           // Viewports don't constrain gl.clear; scissor each camera's tile
           // so later views cannot erase the quilt rendered before them.
@@ -133,5 +160,5 @@ export class PortraitRenderer {
     }
     this.frames++; this.lastSubmitMs=performance.now()-begin;
   }
-  dispose() { this.target.dispose(); this.plane.dispose(); this.material.dispose(); this.renderer.dispose(); }
+  dispose() { this.canvas.removeEventListener('webglcontextrestored',this.resetEnvironment);this.resetEnvironment();this.target.dispose(); this.plane.dispose(); this.material.dispose(); this.renderer.dispose(); }
 }

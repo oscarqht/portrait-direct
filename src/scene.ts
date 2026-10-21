@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import {createTrianglePet} from './triangle-pet';
 import type {Profile} from './calibration';
-export type SceneKind='triangle'|'furry'|'orbital';
+import {createGlassGrid} from './glass-grid';
+export type SceneKind='triangle'|'furry'|'glass'|'orbital';
 export function createScene(kind:SceneKind='triangle',profile:Profile='balanced') {
   const triangle=kind!=='orbital';
   const scene=new THREE.Scene(); scene.background=new THREE.Color(triangle?'#ffffff':'#080d15');
@@ -10,7 +11,18 @@ export function createScene(kind:SceneKind='triangle',profile:Profile='balanced'
   const rim=new THREE.DirectionalLight(triangle?0xfff5ed:0x62a5ff,triangle?.85:3); rim.position.set(triangle?4:-3,1,triangle?2:-2); scene.add(rim);
   const content=new THREE.Group(); content.scale.setScalar(kind==='furry'?.68:.75); scene.add(content);
   if(triangle) {
-    const pet=createTrianglePet(kind==='furry'); content.add(pet.content);pet.setProfile(profile);
+    const pet=createTrianglePet(kind==='furry',kind==='glass'); content.add(pet.content);pet.setProfile(profile);
+    if(kind==='glass') {
+      const grid=createGlassGrid(),worldGrid=new THREE.Matrix4().makeTranslation(0,0,-1.1);
+      content.add(grid);grid.matrixAutoUpdate=false;scene.userData.portraitGlass=true;
+      // Keep the stage stationary while the pet turns. Owning it under content
+      // still lets the existing scene replacement path release every resource.
+      const update=(seconds:number)=>{
+        pet.update(seconds);content.updateWorldMatrix(true,false);
+        grid.matrix.copy(content.matrixWorld).invert().multiply(worldGrid);grid.matrixWorldNeedsUpdate=true;
+      };
+      update(0);return {scene,content,update,setProfile:pet.setProfile};
+    }
     return {scene,content,update:pet.update,setProfile:pet.setProfile};
   }
   const body=new THREE.Mesh(new THREE.TorusKnotGeometry(0.63,0.19,128,16),new THREE.MeshStandardMaterial({color:0xa2c7ff,metalness:0.65,roughness:0.25}));
@@ -27,7 +39,8 @@ export function disposeObject(object: THREE.Object3D) {
     if(child instanceof THREE.Mesh) {
       geometries.add(child.geometry);
       for(const mat of Array.isArray(child.material)?child.material:[child.material]) {
-        for(const value of Object.values(mat)) if(value instanceof THREE.Texture) textures.add(value);
+        // Reflection maps cached by PortraitRenderer survive scene replacement.
+        for(const value of Object.values(mat)) if(value instanceof THREE.Texture&&!value.userData.portraitRendererOwned) textures.add(value);
         materials.add(mat);
       }
       if(child instanceof THREE.InstancedMesh) child.dispose();

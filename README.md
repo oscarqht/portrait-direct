@@ -38,7 +38,9 @@ Choose **Furry triangle · Working** in the Scene menu for a fluffy lavender ver
 
 The furry version uses a longer, draping coat with finer eight-segment fibers and softer root-to-tip shading. A damped spring responds to body acceleration, rotation and squash, with follow-through at the hair tips. Fur stays trimmed around the eyes and keyboard. Its state is updated once before all holographic views, and Pause freezes the body and coat together.
 
-To project either character, select **Purple triangle · Working** or **Furry triangle · Working**, choose **Calibrated hologram**, then **Start output** after connecting the display and importing its calibration. Use **Play working** to enable animation. The same live Three.js character is rendered from every light-field camera; this is not a flat sprite or a video. The scene selection and motion preference are saved by the native app.
+Choose **Liquid glass triangle · Working** for Alpha Bro Pets' physical glass styling: lavender absorption, curved refraction, subtle color dispersion and soft studio reflections. A stationary gray line grid sits behind the character as real scene geometry, visibly bending through the body. The face stays out of the refraction capture to avoid duplicate eyes. The same typing animation, drag rotation and pause controls apply.
+
+To project a character, select its style in **Scene**, choose **Calibrated hologram**, then **Start output** after connecting the display and importing its calibration. Use **Play working** to enable animation. The same live Three.js character is rendered from every light-field camera; this is not a flat sprite or a video. The scene selection and motion preference are saved by the native app.
 
 The **Scene** menu also offers the original Orbital study. You can load a **self-contained, uncompressed `.glb` under 64 MB**. Draco, KTX2 and Meshopt decoders are not bundled; external model resources are not supported. Imported model animation clips are not played; Play motion turns the model. Selecting a built-in scene leaves the imported model; Reset scene restores the paused purple triangle.
 
@@ -65,15 +67,15 @@ The scene's screen/convergence plane is z=0, camera axis is +z looking toward -z
 | Balanced | 48 | 2520 × 2520 | 30 fps |
 | Detail | 48 | 3360 × 3360 | 30 fps |
 
-Motion is off by default. Static content sleeps after its dirty frame. A timer plus vsync caps animation without a continuously polling 60/120 Hz loop. Low Power Mode selects Eco. The laptop's preview pauses during output; sleep pauses rendering. The app does not keep the display/system awake. One render target, one direct GPU interlacing pass, no MSAA, no per-frame texture readbacks, canvas-to-canvas copies or video transport. Eco trades angular resolution for lower cost; test its quality on the device.
+Motion is off by default. Static content sleeps after its dirty frame. A timer plus vsync caps animation without a continuously polling 60/120 Hz loop. Low Power Mode selects Eco. The laptop's preview pauses during output; sleep pauses rendering. The app does not keep the display/system awake. The smooth and furry scenes use one quilt target and one direct GPU interlacing pass without MSAA. Liquid glass adds Three.js's reusable, tile-sized multisampled transmission target, rendered for each view, and a small studio reflection map generated once per renderer. There are no per-frame texture readbacks, canvas-to-canvas copies or video transport. Eco trades angular resolution for lower cost; test its quality on the device.
 
 The shown timing is **CPU submission**, not GPU execution or end-to-end latency. Initial shader compilation can produce a slow first frame. No claim of outperforming Bridge/Studio or measured battery savings is made. The panel continues consuming power and receiving HDMI scanout even when scene rendering sleeps. For comparisons, use the same scene and panel mode, then measure sustained GPU time, frame cadence, total process memory and battery/energy use after warm-up.
 
 ## Validation
 
-All **10 automated tests** pass. `npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources. Fur tests cover deterministic coverage, normals and eye tapering, density changes, spring lag and settling, pause behavior and reuse of geometry attributes.
+All **11 automated tests** pass. `npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources. Fur tests cover deterministic coverage, normals and eye tapering, density changes, spring lag and settling, pause behavior and reuse of geometry attributes.
 
-`tests/browser-check.ts` renders synthetic view-coded quilts and compares real GPU output pixels with an independent CPU optical calculation for every quality profile. Readbacks exist only in this test. Run with browser-harness while the dev server is open:
+`tests/browser-check.ts` renders synthetic view-coded quilts and compares real GPU output pixels with an independent CPU optical calculation for every quality profile. Glass checks verify visible grid refraction and compare the first, middle and last quilt views against independently rendered cameras in each profile, allowing small rasterization differences at high-contrast edges. Readbacks exist only in this test. Run with browser-harness while the dev server is open:
 
 ```python
 print(js('(async()=>JSON.stringify((await import("/tests/browser-check.ts")).checkGPU()))()'))

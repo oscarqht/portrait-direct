@@ -4,16 +4,19 @@ import {createSoftBody,createGroundShadow} from './soft-body';
 import {createWorkingPose, sampleWorkingPose} from './working-pose';
 import {createFur} from './fur';
 import type {Profile} from './calibration';
+import {createGlassMaterial} from './glass';
 
 /** Alpha Bro's purple triangle / Working, adapted to the direct light-field renderer.
  * Shared geometry and instanced keys keep the cost bounded across 24–48 views.
- * No transmission, shadow maps, textures, React, or extra animation loop is needed. */
-export function createTrianglePet(furry=false) {
+ * Glass uses mesh transmission; all styles share one animation clock. */
+export function createTrianglePet(furry=false,glass=false) {
   const root=new THREE.Group(); root.name='purple-triangle-working';
   const pet=new THREE.Group(); pet.name='pet-body-rig'; root.add(pet);
-  const purple=new THREE.MeshPhysicalMaterial({color:'#ac7bfa',roughness:furry?.96:.53,metalness:0,clearcoat:furry?0:.2,clearcoatRoughness:.48});
-  const white=new THREE.MeshStandardMaterial({color:'#ffffff',roughness:.3});
-  const ink=new THREE.MeshStandardMaterial({color:'#30203f',roughness:.3});
+  const purple=glass?createGlassMaterial('#ac7bfa',.14):new THREE.MeshPhysicalMaterial({color:'#ac7bfa',roughness:furry?.96:.53,metalness:0,clearcoat:furry?0:.2,clearcoatRoughness:.48});
+  // Transparent face materials render after the glass and stay out of its
+  // opaque refraction capture, avoiding duplicate refracted eyes.
+  const white=new THREE.MeshStandardMaterial({color:'#ffffff',roughness:.3,transparent:glass});
+  const ink=new THREE.MeshStandardMaterial({color:'#30203f',roughness:.3,transparent:glass});
   const chassis=new THREE.MeshStandardMaterial({color:'#e3d8f3',roughness:.65});
   const plate=new THREE.MeshStandardMaterial({color:'#bcaed4',roughness:.65});
   const keyMaterial=new THREE.MeshStandardMaterial({color:'#ffffff',roughness:.35,metalness:.08});
@@ -24,11 +27,12 @@ export function createTrianglePet(furry=false) {
     const item=new THREE.Mesh(geometry,material); item.position.set(x,y,z); item.scale.set(sx,sy,sz); parent.add(item); return item;
   }
   const body=createSoftBody();
-  mesh(pet,body.geometry,purple,0,0,0).name='triangle-body';
+  mesh(pet,body.geometry,glass?createGlassMaterial('#ac7bfa'):purple,0,0,0).name='triangle-body';
   const fur=furry?createFur(body.geometry):undefined;
   if(fur)pet.add(fur.mesh);
   root.add(createGroundShadow());
   const face=new THREE.Group(); face.name='pet-face'; pet.add(face);
+  if(glass)face.renderOrder=50;
   const eyes:THREE.Group[]=[];
   for(const side of [-1,1]) {
     const eye=new THREE.Group(); eye.position.x=side*.29; face.add(eye); eyes.push(eye);

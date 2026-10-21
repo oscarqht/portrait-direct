@@ -2,7 +2,7 @@
 // ONLY; the production rendering path never reads pixels back to the CPU.
 import * as THREE from 'three';
 import {PortraitRenderer} from '../src/renderer';
-import {parseCalibration,opticalUniforms,profiles} from '../src/calibration';
+import {parseCalibration,opticalUniforms,profiles,viewOffset} from '../src/calibration';
 import {createScene,disposeObject} from '../src/scene';
 import {furCounts} from '../src/fur';
 export function checkGPU() {
@@ -77,8 +77,68 @@ export function checkGPU() {
     const gl=renderer.renderer.getContext(),pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
     if(pixel[0]!==255||pixel[1]!==255||pixel[2]!==255)throw new Error('Static pattern border failed');
     const fur=checkFurGPU(renderer,calibration);
-    return {passed:true,profiles:results,defaultModelBounds,staticPattern:true,fur};
+    const glass=checkGlassGPU(renderer,calibration);
+    return {passed:true,profiles:results,defaultModelBounds,staticPattern:true,fur,glass};
   } finally {renderer.dispose();geometry.dispose();material.dispose();}
+}
+
+function checkGlassGPU(renderer:PortraitRenderer,calibration:ReturnType<typeof parseCalibration>) {
+  const glass=createScene('glass'),r=renderer.renderer,gl=r.getContext();
+  const body=glass.content.getObjectByName('triangle-body') as THREE.Mesh<THREE.BufferGeometry,THREE.MeshPhysicalMaterial>;
+  const previousError=r.debug.onShaderError;
+  r.debug.onShaderError=(context,_program,vertex,fragment)=>{throw new Error(`Glass shader failed: ${context.getShaderInfoLog(vertex)} ${context.getShaderInfoLog(fragment)}`);};
+  const read=(x:number,y:number,w:number,h:number)=>{
+    const pixels=new Uint8Array(w*h*4);gl.readPixels(x,y,w,h,gl.RGBA,gl.UNSIGNED_BYTE,pixels);return pixels;
+  };
+  try {
+    glass.content.rotation.set(.12,.2,0);glass.update(.37);
+    renderer.configure('balanced',calibration);
+    const beforeColor=body.material.color.clone(),beforeAttenuation=body.material.attenuationColor.clone();
+    body.material.color.set('white');body.material.attenuationColor.set('white');
+    renderer.render(glass.scene,'preview',256,320);const refracted=read(0,0,256,320);
+    const thickness=body.material.thickness;body.material.thickness=0;
+    renderer.render(glass.scene,'preview',256,320);const flat=read(0,0,256,320);
+    body.material.thickness=thickness;body.material.color.copy(beforeColor);body.material.attenuationColor.copy(beforeAttenuation);
+    let refractionPixels=0;
+    for(let i=0;i<flat.length;i+=4)if(Math.max(...[0,1,2].map(c=>Math.abs(flat[i+c]-refracted[i+c])))>8)refractionPixels++;
+    if(refractionPixels<300)throw new Error('Glass thickness did not visibly refract the gray grid.');
+    const results=[];
+    // Compare quilt tiles to independent full-frame camera renders. Transmission
+    // switches render targets inside Three; restoring a full-quilt viewport or
+    // reusing another view's refraction image corrupts these comparisons.
+    const camera=new THREE.PerspectiveCamera(18,.75,.1,100);
+    for(const profile of ['eco','balanced','detail'] as const) {
+      renderer.configure(profile,calibration);
+      const p=profiles[profile],count=p.columns*p.rows;
+      renderer.render(glass.scene,'quilt',p.columns*p.tileW,p.rows*p.tileH);
+      const views=[0,Math.floor(count/2),count-1];
+      const tiles=views.map(i=>read(i%p.columns*p.tileW,Math.floor(i/p.columns)*p.tileH,p.tileW,p.tileH));
+      let maxPixelError=0,totalError=0,channels=0,differentPixels=0,sampledPixels=0;
+      views.forEach((view,index)=>{
+        const offset=viewOffset(view,count,10,calibration.viewCone),halfY=.1*Math.tan(Math.PI/20),midpoint=-.1*offset/10;
+        camera.position.set(offset,0,10);
+        camera.projectionMatrix.makePerspective(midpoint-halfY*.75,midpoint+halfY*.75,halfY,-halfY,.1,100);
+        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();camera.updateMatrixWorld(true);
+        r.setRenderTarget(null);r.setSize(p.tileW,p.tileH,false);r.setViewport(0,0,p.tileW,p.tileH);r.setScissorTest(false);r.clear();r.render(glass.scene,camera);
+        const independent=read(0,0,p.tileW,p.tileH),tile=tiles[index];
+        for(let i=0;i<tile.length;i+=32){
+          let error=0;
+          for(let c=0;c<3;c++){
+            const channelError=Math.abs(tile[i+c]-independent[i+c]);
+            error=Math.max(error,channelError);totalError+=channelError;channels++;
+          }
+          if(error>3)differentPixels++;sampledPixels++;maxPixelError=Math.max(maxPixelError,error);
+        }
+      });
+      // Rasterization at different framebuffer offsets can move high-contrast
+      // edges by a subpixel. Bound both mean error and the affected pixel share.
+      const meanPixelError=totalError/channels,differentFraction=differentPixels/sampledPixels;
+      if(meanPixelError>.4||differentFraction>.015)throw new Error(`${profile}: glass quilt differs from independent camera renders: mean ${meanPixelError}, fraction ${differentFraction}`);
+      if(gl.getError()!==gl.NO_ERROR)throw new Error(`${profile}: glass GL error`);
+      results.push({profile,views:count,independentViewsChecked:views,maxPixelError,meanPixelError,differentFraction});
+    }
+    return {passed:true,refractionPixels,profiles:results};
+  } finally {r.debug.onShaderError=previousError;disposeObject(glass.content);}
 }
 
 function checkFurGPU(renderer:PortraitRenderer,calibration:ReturnType<typeof parseCalibration>) {
