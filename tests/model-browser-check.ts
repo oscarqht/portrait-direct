@@ -22,3 +22,30 @@ export async function checkImportedModels() {
   }
   return results;
 }
+
+/** Large-file regression: parsing stays off the UI thread and can be cancelled. */
+export async function checkModelWorker(url:string,name:string) {
+  const controller=new AbortController();
+  let processing=false;
+  try {
+    await loadImportedModel(url,name,{signal:controller.signal,onProgress:phase=>{
+      if(phase.startsWith('Reading 3D/')) {processing=true;controller.abort();}
+    }});
+    throw new Error('Cancelled model unexpectedly loaded.');
+  } catch(error) {
+    if(!(error instanceof DOMException)||error.name!=='AbortError'||!processing) throw error;
+  }
+  let ticks=0,maxGap=0,last=performance.now();
+  const heartbeat=setInterval(()=>{const now=performance.now();ticks++;maxGap=Math.max(maxGap,now-last);last=now;},25);
+  const start=performance.now();
+  try {
+    const model=await loadImportedModel(url,name);
+    const elapsedMs=performance.now()-start;
+    try {
+      let triangles=0;
+      model.traverse(child=>{if(child instanceof THREE.Mesh)triangles+=(child.geometry.index?.count??child.geometry.getAttribute('position').count)/3;});
+      if(!ticks||maxGap>500) throw new Error(`Model import blocked the UI: ${maxGap}ms.`);
+      return {elapsedMs,ticks,maxGap,triangles,cancelled:true};
+    } finally {disposeObject(model);}
+  } finally {clearInterval(heartbeat);}
+}

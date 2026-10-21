@@ -8,7 +8,7 @@ import { createScene, disposeObject, type SceneKind } from './scene';
 
 interface Settings { profile:Profile; animate:boolean; mode:OutputMode; scene:SceneKind; zoom:number; yaw:number; calibration:Calibration|null; modelUrl?:string; modelName?:string }
 interface Display { id:number; name:string; width:number; height:number; builtIn:boolean; mirrored:boolean; valid:boolean; reason:string }
-interface Host { displays:Display[]; presenting:boolean; lowPower:boolean; suspended:boolean; events:string[]; settings?:Settings; message?:string }
+interface Host { displays:Display[]; presenting:boolean; outputReady?:boolean; lowPower:boolean; suspended:boolean; events:string[]; settings?:Settings; message?:string }
 declare global { interface Window { webkit?:{messageHandlers:{portrait:{postMessage:(data:unknown)=>void}}}; portraitReceive?:(event:any)=>void; portraitDebug?:()=>unknown } }
 const native=!!window.webkit?.messageHandlers.portrait;
 const output=new URLSearchParams(location.search).has('output');
@@ -22,6 +22,8 @@ let scheduler:FrameScheduler|undefined;
 let sceneState:ReturnType<typeof createScene>|undefined;
 let modelToken=0, loadedModel:string|undefined, loadedScene:SceneKind='triangle', frameTotal=0, previousTime:number|undefined;
 let animationTime=0, fatal=false;
+let modelLoad:AbortController|undefined, modelLoading=false, modelError='', installedModel:string|undefined, outputReady=false;
+let modelLoadMs=0, modelStarted=0;
 const channel=!native && 'BroadcastChannel' in window?new BroadcastChannel('portrait-direct'):null;
 
 function send(data:unknown) { window.webkit?.messageHandlers.portrait.postMessage(data); }
@@ -56,7 +58,7 @@ function syncActivity() {
   if(scheduler) {
     scheduler.fps=profiles[effectiveProfile()].fps;
     scheduler.setActive(active);
-    scheduler.setAnimated(settings.animate&&settings.mode!=='test');
+    scheduler.setAnimated(settings.animate&&!modelLoading&&settings.mode!=='test');
   }
   if(!active||!settings.animate||settings.mode==='test') previousTime=undefined;
 }
@@ -73,7 +75,7 @@ function setupRenderer(canvas:HTMLCanvasElement) {
     scheduler=new FrameScheduler(now=>{
       if(!render||!sceneState) return;
       try {
-        const moving=settings.animate&&settings.mode!=='test';
+        const moving=settings.animate&&!modelLoading&&settings.mode!=='test';
         if(moving&&previousTime!==undefined) animationTime+=Math.min((now-previousTime)/1000,0.1);
         previousTime=moving?now:undefined;
         sceneState.content.rotation.y=settings.yaw+(settings.modelUrl||settings.scene==='orbital'?animationTime*0.25:0);
@@ -82,10 +84,13 @@ function setupRenderer(canvas:HTMLCanvasElement) {
         const box=canvas.getBoundingClientRect();
         render.render(sceneState.scene,output?settings.mode:'preview',output?1536:Math.max(1,Math.round(box.width)),output?2048:Math.max(1,Math.round(box.height)),settings.zoom);
         frameTotal=render.frames;
+        if(output&&!outputReady&&!modelLoading&&!modelError&&(!settings.modelUrl||installedModel===settings.modelUrl)) {
+          outputReady=true;setLoadingMessage('');send({type:'outputReady'});
+        }
         const ms=document.querySelector('#submit'); if(ms) ms.textContent=`${render.lastSubmitMs.toFixed(1)} ms`;
         const frames=document.querySelector('#frames'); if(frames) frames.textContent=String(frameTotal);
         // Native telemetry is bounded to one update per second of actual rendering.
-        if(output && now-lastTelemetry>1000) { lastTelemetry=now; send({type:'metrics',frames:frameTotal,submitMs:render.lastSubmitMs,profile:effectiveProfile()}); }
+        if(output && now-lastTelemetry>1000) { lastTelemetry=now; send({type:'metrics',frames:frameTotal,modelLoading,modelError,modelLoaded:!!settings.modelUrl&&installedModel===settings.modelUrl,modelLoadMs,outputReady,submitMs:render.lastSubmitMs,profile:effectiveProfile()}); }
       } catch(e) { fatal=true; syncActivity(); report(String(e)); }
     });
     new ResizeObserver(()=>scheduler?.invalidate()).observe(canvas);
@@ -93,27 +98,49 @@ function setupRenderer(canvas:HTMLCanvasElement) {
   } catch(e) { report(`WebGL2 could not start: ${String(e)}`); }
 }
 let lastTelemetry=0;
+function setLoadingMessage(message:string) {
+  const el=document.querySelector<HTMLElement>('#model-loading');
+  if(el) {el.textContent=message;el.hidden=!message;}
+}
 async function loadModel(url?:string) {
-  loadedModel=url;
+  modelLoad?.abort();modelLoad=undefined;
+  loadedModel=url;modelError='';outputReady=false;
   const token=++modelToken;
   if(!sceneState) return;
   if(!url) {
+    modelLoading=false;installedModel=undefined;setLoadingMessage('');
     disposeObject(sceneState.content);
     loadedScene=settings.scene; sceneState=createScene(loadedScene,effectiveProfile()); animationTime=0; previousTime=undefined;
-    scheduler?.invalidate();
+    syncActivity();scheduler?.invalidate();
     return;
   }
+  const controller=modelLoad=new AbortController();
+  modelLoading=true;modelStarted=performance.now();
+  setLoadingMessage('Reading model…');syncActivity();if(!output)refresh();
   try {
-    const model=await loadImportedModel(url,settings.modelName);
+    const model=await loadImportedModel(url,settings.modelName,{signal:controller.signal,onProgress:message=>{
+      if(token===modelToken)setLoadingMessage(message);
+    }});
     if(token!==modelToken) { disposeObject(model); return; }
     const group=new THREE.Group(); group.add(model);
     disposeObject(sceneState.content); sceneState.scene.remove(sceneState.content);
-    sceneState.content=group; sceneState.update=()=>{}; sceneState.setProfile=()=>{}; sceneState.scene.add(group); animationTime=0; previousTime=undefined; scheduler?.invalidate();
-  } catch(e) { if(token===modelToken) report(`Could not load model: ${String(e)}. Use a self-contained GLB, STL or 3MF; compressed GLB requires decoders that are not bundled.`); }
+    sceneState.content=group; sceneState.update=()=>{}; sceneState.setProfile=()=>{}; sceneState.scene.add(group);
+    installedModel=url;modelLoadMs=performance.now()-modelStarted;
+    animationTime=0; previousTime=undefined;
+    // Keep the loading overlay through the first GPU submission.
+    setLoadingMessage(output?'Preparing Portrait output…':'');
+  } catch(e) {
+    if(token===modelToken&&!controller.signal.aborted) {
+      modelError=String(e);setLoadingMessage('');
+      report(`Could not load model: ${modelError}. Use a self-contained GLB, STL or 3MF; compressed GLB requires decoders that are not bundled.`);
+    }
+  } finally {
+    if(token===modelToken) {modelLoading=false;syncActivity();if(!output)refresh();scheduler?.invalidate();}
+  }
 }
 
 if(output) {
-  document.body.className='output'; app.innerHTML='<canvas id="output" aria-label="Portrait output"></canvas>';
+  document.body.className='output'; app.innerHTML='<canvas id="output" aria-label="Portrait output"></canvas><div id="model-loading" role="status" class="model-loading">Preparing Portrait output…</div>';
   // Wait for the host state before rendering; no uncalibrated first frame.
   if(!native) {
     report('Holographic output requires the native macOS app.');
@@ -123,7 +150,7 @@ if(output) {
   app.innerHTML=`
     <header><div class="brand"><span class="mark">▱</span><div>Portrait <b>Direct</b><small>LIGHT FIELD · LOCAL FIRST</small></div></div><span class="pill" id="connection">Preview mode</span></header>
     <main><section class="stage"><div class="stage-top"><span class="eyebrow">YOUR SPACE, IN THREE DIMENSIONS</span><span class="live-dot"></span></div>
-      <div class="canvas-wrap"><canvas id="preview" aria-label="Interactive 3D preview"></canvas><div class="preview-badge">2D PREVIEW</div><div id="presenting-cover" hidden>Rendering on your Portrait<span>Laptop preview is sleeping to save energy.</span></div></div>
+      <div class="canvas-wrap"><canvas id="preview" aria-label="Interactive 3D preview"></canvas><div class="preview-badge">2D PREVIEW</div><div id="model-loading" class="model-loading" role="status" hidden></div><div id="presenting-cover" hidden>Rendering on your Portrait<span>Laptop preview is sleeping to save energy.</span></div></div>
       <div class="stage-bottom"><div><span class="eyebrow">NOW SHOWING</span><h1 id="scene-name">Purple triangle</h1><p id="scene-description">A little focus, a lot of typing. Drag to turn.</p></div><button id="animate" class="secondary">Play working</button></div>
       <div class="metrics"><div><small>RENDER POLICY</small><strong id="policy">On demand</strong></div><div><small>VIEWS / FRAME</small><strong id="view-count">48</strong></div><div><small>CPU SUBMISSION</small><strong id="submit">—</strong></div><div><small>PREVIEW FRAMES</small><strong id="frames">0</strong></div></div>
       <p id="notice" role="alert"></p>
@@ -189,7 +216,7 @@ if(output) {
 function refresh() {
   if(output)return;
   const p=profiles[effectiveProfile()];
-  const connection=document.querySelector('#connection')!;connection.textContent=host.presenting?'Output active':host.displays.some(d=>d.valid)?'Portrait connected':native?'Waiting for Portrait':'Browser preview';
+  const connection=document.querySelector('#connection')!;connection.textContent=host.presenting?(host.outputReady?'Output active':'Preparing output'):host.displays.some(d=>d.valid)?'Portrait connected':native?'Waiting for Portrait':'Browser preview';
   connection.classList.toggle('connected',host.presenting||host.displays.some(d=>d.valid));
   const triangle=!settings.modelUrl&&settings.scene!=='orbital';
   document.querySelector('#animate')!.textContent=settings.animate?'Pause motion':triangle?'Play working':'Play motion';
@@ -213,9 +240,9 @@ function refresh() {
   eligible.forEach(d=>{const option=new Option(`${d.name} · ${d.width} × ${d.height}${d.valid?'':` · ${d.reason}`}`,String(d.id));option.disabled=!d.valid;option.selected=d.id===selectedDisplay;select.add(option);});
   const target=eligible.find(d=>d.id===selectedDisplay&&d.valid);
   const present=document.querySelector<HTMLButtonElement>('#present')!;
-  present.textContent=host.presenting?'Stop output':'Start output ↗';
-  present.disabled=!host.presenting&&(!native||!target||(settings.mode==='hologram'&&!settings.calibration));
-  document.querySelector('#output-hint')!.textContent=host.presenting?'Output stays on the selected display. Escape stops it.':settings.mode==='test'?'Static test needs no calibration and renders once.':'Exact-pixel output requires a connected Portrait; holograms also need its calibration.';
+  present.textContent=host.presenting?'Stop output':modelLoading?'Loading model…':'Start output ↗';
+  present.disabled=!host.presenting&&(!native||!target||modelLoading||!!modelError||(settings.mode==='hologram'&&!settings.calibration));
+  document.querySelector('#output-hint')!.textContent=host.presenting?(host.outputReady?'Output stays on the selected display. Escape stops it.':'Preparing the model for your Portrait…'):settings.mode==='test'?'Static test needs no calibration and renders once.':'Exact-pixel output requires a connected Portrait; holograms also need its calibration.';
   document.querySelector<HTMLElement>('#presenting-cover')!.hidden=!host.presenting;
   document.querySelector('#device-help')!.textContent=native?'Use HDMI + USB power. Set the Portrait as an extended 1536 × 2048 display.':'Explore the scene here. Open Portrait Direct.app to discover displays and project to the device.';
   document.querySelector('#events')!.textContent=host.events.length?host.events.join('\n'):'No hardware connected. No hardware fix has been verified.';
@@ -227,7 +254,7 @@ window.portraitReceive=(event)=>{
       if(event.host.settings)settings=sanitize(event.host.settings);
       if(output&&!render)setupRenderer(document.querySelector('#output')!);
       update({},false);
-      if(event.host.message)report(event.host.message);
+      if(event.host.message&&!output&&event.host.message!=='Preparing Portrait output…')report(event.host.message);
     } else if(event.type==='calibration') update({calibration:parseCalibration(event.value)});
     else if(event.type==='model')update({modelUrl:event.url,modelName:event.name});
     else if(event.type==='error')report(event.message);
@@ -238,7 +265,7 @@ window.portraitReceive=(event)=>{
 };
 channel?.addEventListener('message',e=>{if(e.data.type==='settings'&&output)update(e.data.settings,false);});
 document.addEventListener('visibilitychange',syncActivity);
-window.addEventListener('pagehide',()=>{scheduler?.dispose();render?.dispose();if(sceneState)disposeObject(sceneState.content);channel?.close();});
-window.portraitDebug=()=>({frames:frameTotal,submitMs:render?.lastSubmitMs,profile:effectiveProfile(),scene:settings.modelUrl?'model':settings.scene,animationTime,animate:settings.animate,output,native,hidden:document.hidden,calibrated:!!settings.calibration,glError:render?.renderer.getContext().getError()});
+window.addEventListener('pagehide',()=>{modelLoad?.abort();scheduler?.dispose();render?.dispose();if(sceneState)disposeObject(sceneState.content);channel?.close();});
+window.portraitDebug=()=>({frames:frameTotal,modelLoading,modelError,modelLoaded:!!settings.modelUrl&&installedModel===settings.modelUrl,modelLoadMs,outputReady,submitMs:render?.lastSubmitMs,profile:effectiveProfile(),scene:settings.modelUrl?'model':settings.scene,animationTime,animate:settings.animate,output,native,hidden:document.hidden,calibrated:!!settings.calibration,glError:render?.renderer.getContext().getError()});
 if(native)send({type:'ready',output});
 

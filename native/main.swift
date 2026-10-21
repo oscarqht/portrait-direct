@@ -39,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     var output: NSWindow?
     var outputView: WKWebView?
     var outputDisplay: CGDirectDisplayID?
+    var outputReady = false
     var settings: [String: Any] = ["profile": "balanced", "animate": false, "mode": "hologram", "zoom": 1, "yaw": 0]
     var events: [String] = []
     var observers: [NSObjectProtocol] = []
@@ -122,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
     }
     func state() -> [String: Any] {
         ["displays": displayList(), "presenting": output != nil, "lowPower": ProcessInfo.processInfo.isLowPowerModeEnabled,
-         "suspended": suspended, "events": events, "settings": settings, "message": message]
+         "suspended": suspended, "events": events, "settings": settings, "message": message, "outputReady": outputReady]
     }
     func emit(_ object: [String: Any], to view: WKWebView?) {
         guard let view = view, readyViews.contains(ObjectIdentifier(view)),
@@ -153,7 +154,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         case "importCalibration" where source === controlView: importCalibration()
         case "importModel" where source === controlView: importModel()
         case "export" where source === controlView: exportReport()
-        case "metrics": lastMetrics = body; emit(body, to: controlView)
+        case "outputReady" where source === outputView:
+            if !outputReady {
+                outputReady = true; message = ""; log("Portrait renderer ready: first model frame submitted."); broadcast()
+            }
+        case "metrics" where source === outputView: lastMetrics = body; emit(body, to: controlView)
         case "rendererError": message = body["message"] as? String ?? "Renderer error"; log(message); stop()
         case "log": log(body["message"] as? String ?? "Renderer event"); broadcast()
         default: break
@@ -167,7 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             message = "Choose an external, unmirrored Portrait running at native 1536 × 2048. No output was opened."; broadcast(); return
         }
         guard settings["mode"] as? String != "hologram" || settings["calibration"] is [String: Any] else { message = "Import this Portrait’s Visual.json before starting holographic output."; broadcast(); return }
-        message = ""; outputDisplay = id
+        message = ""; outputReady = false; outputDisplay = id
         let window = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false, screen: screen)
         window.isReleasedWhenClosed = false; window.delegate = self
         window.backgroundColor = .black; window.isOpaque = true; window.hasShadow = false
@@ -177,7 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         let view = makeView(); window.contentView = view; output = window; outputView = view
         view.load(URLRequest(url: URL(string: "portrait://app/index.html?output=1")!))
         window.orderFrontRegardless()
-        log("Output started on display \(id), native 1536×2048, mode \(settings["mode"] ?? "?"). Laptop preview paused.")
+        log("Output opening on display \(id), native 1536×2048, mode \(settings["mode"] ?? "?"). Waiting for the first model frame.")
         broadcast()
     }
     func stop() {
@@ -187,7 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
             view.configuration.userContentController.removeScriptMessageHandler(forName: "portrait")
         }
         if output != nil { log("Output stopped") }
-        output?.orderOut(nil); output?.close(); output = nil; outputView = nil; outputDisplay = nil
+        output?.orderOut(nil); output?.close(); output = nil; outputView = nil; outputDisplay = nil; outputReady = false
         broadcast()
     }
     func screensChanged() {
@@ -254,28 +259,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         decisionHandler(navigationAction.request.url?.scheme == "portrait" && navigationAction.request.url?.host == "app" ? .allow : .cancel)
     }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        message = "Web content process exited. Stop and reopen the app to recover."; log(message); stop()
+        message = "\(webView === outputView ? "Output" : "Preview") web content process exited. Stop and reopen the app to recover."; log(message); stop()
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        navigationFailed(webView, error: error)
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        navigationFailed(webView, error: error)
+    }
+    func navigationFailed(_ webView: WKWebView, error: Error) {
+        guard webView === controlView || webView === outputView,
+              (error as NSError).code != NSURLErrorCancelled else { return }
+        message = "\(webView === outputView ? "Output" : "Preview") could not open: \(error.localizedDescription)"
+        log(message); if webView === outputView { stop() } else { broadcast() }
+    }
+    // Exercise the real output page and GPU size without covering an attached
+    // Portrait. This is only enabled together with the explicit smoke-test flag.
+    func openTestOutput() {
+        let window = NSWindow(contentRect: NSRect(x: 40, y: 40, width: 384, height: 512), styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = "Portrait output validation"; window.isReleasedWhenClosed = false
+        let view = makeView(); window.contentView = view; output = window; outputView = view
+        view.load(URLRequest(url: URL(string: "portrait://app/index.html?output=1")!))
+        window.makeKeyAndOrderFront(nil); broadcast()
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        guard webView === controlView, let path = testPath else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now()+3) {
-            if let index = CommandLine.arguments.firstIndex(of: "--gpu-check"), CommandLine.arguments.count > index+1,
-               let source = try? String(contentsOfFile: CommandLine.arguments[index+1], encoding: .utf8) {
-                webView.evaluateJavaScript(source + "; JSON.stringify(PortraitGPUCheck.checkGPU())") { value, error in
-                    let gpu = (value as? String) ?? "{\"error\":\"\(error?.localizedDescription ?? "No result")\"}"
-                    try? gpu.write(toFile: path + "-gpu.json", atomically: true, encoding: .utf8)
-                }
+        guard let path = testPath else { return }
+        let checkOutput = CommandLine.arguments.contains("--output-check")
+        if checkOutput && webView === controlView { openTestOutput(); return }
+        guard webView === (checkOutput ? outputView : controlView) else { return }
+        let deadline = Date().addingTimeInterval(120)
+        waitForSmokeRenderer(webView, path: path, deadline: deadline)
+    }
+    func waitForSmokeRenderer(_ webView: WKWebView, path: String, deadline: Date) {
+        webView.evaluateJavaScript("JSON.stringify(window.portraitDebug?.())") { [weak self] value, _ in
+            guard let self = self else { return }
+            let debug = (value as? String).flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+            var waiting = debug ?? ["error": "Renderer has not initialized"]
+            waiting["events"] = self.events; waiting["message"] = self.message
+            if let data = try? JSONSerialization.data(withJSONObject: waiting, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: URL(fileURLWithPath: path + "-state.json"), options: .atomic)
             }
-            webView.evaluateJavaScript("window.__idleFrames=window.portraitDebug?.().frames")
-            DispatchQueue.main.asyncAfter(deadline: .now()+1) {
+            let loaded = self.settings["modelUrl"] == nil || debug?["modelLoaded"] as? Bool == true
+            let failed = !(debug?["modelError"] as? String ?? "").isEmpty
+            if Date() < deadline && !failed && ((debug?["frames"] as? Int ?? 0) == 0 || !loaded) {
+                DispatchQueue.main.asyncAfter(deadline: .now()+0.25) { self.waitForSmokeRenderer(webView, path: path, deadline: deadline) }
+                return
+            }
+            self.captureSmoke(webView, path: path)
+        }
+    }
+    func captureSmoke(_ webView: WKWebView, path: String) {
+        if let index = CommandLine.arguments.firstIndex(of: "--gpu-check"), CommandLine.arguments.count > index+1,
+           let source = try? String(contentsOfFile: CommandLine.arguments[index+1], encoding: .utf8) {
+            webView.evaluateJavaScript(source + "; JSON.stringify(PortraitGPUCheck.checkGPU())") { value, error in
+                let gpu = (value as? String) ?? "{\"error\":\"\(error?.localizedDescription ?? "No result")\"}"
+                try? gpu.write(toFile: path + "-gpu.json", atomically: true, encoding: .utf8)
+            }
+        }
+        webView.evaluateJavaScript("window.__idleFrames=window.portraitDebug?.().frames")
+        DispatchQueue.main.asyncAfter(deadline: .now()+1) {
             webView.evaluateJavaScript("JSON.stringify({renderer:window.portraitDebug?.(),idleFramesBefore:window.__idleFrames,title:document.title,body:document.body.innerText,canvas:!!document.querySelector('canvas')})") { value, error in
-                let result = (value as? String) ?? "{\"error\":\"\(error?.localizedDescription ?? "No result")\"}"
-                try? result.write(toFile: path + ".json", atomically: true, encoding: .utf8)
+                let payload = (value as? String)?.data(using: .utf8)
+                var report = payload.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? ["error": error?.localizedDescription ?? "No result"]
+                report["outputReady"] = self.outputReady; report["events"] = self.events; report["message"] = self.message
+                let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                if let data = data { try? data.write(to: URL(fileURLWithPath: path + ".json")) }
                 webView.takeSnapshot(with: nil) { image, _ in
                     if let image = image, let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) { try? png.write(to: URL(fileURLWithPath: path + ".png")) }
-                    print(result); NSApp.terminate(nil)
+                    if let data = data, let result = String(data: data, encoding: .utf8) { print(result) }
+                    NSApp.terminate(nil)
                 }
-            }
             }
         }
     }
