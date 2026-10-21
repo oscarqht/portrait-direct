@@ -2,14 +2,16 @@ import * as THREE from 'three';
 import {RoundedBoxGeometry} from 'three/addons/geometries/RoundedBoxGeometry.js';
 import {createSoftBody,createGroundShadow} from './soft-body';
 import {createWorkingPose, sampleWorkingPose} from './working-pose';
+import {createFur} from './fur';
+import type {Profile} from './calibration';
 
 /** Alpha Bro's purple triangle / Working, adapted to the direct light-field renderer.
  * Shared geometry and instanced keys keep the cost bounded across 24–48 views.
  * No transmission, shadow maps, textures, React, or extra animation loop is needed. */
-export function createTrianglePet() {
+export function createTrianglePet(furry=false) {
   const root=new THREE.Group(); root.name='purple-triangle-working';
   const pet=new THREE.Group(); pet.name='pet-body-rig'; root.add(pet);
-  const purple=new THREE.MeshPhysicalMaterial({color:'#ac7bfa',roughness:.53,metalness:0,clearcoat:.2,clearcoatRoughness:.48});
+  const purple=new THREE.MeshPhysicalMaterial({color:'#ac7bfa',roughness:furry?.96:.53,metalness:0,clearcoat:furry?0:.2,clearcoatRoughness:.48});
   const white=new THREE.MeshStandardMaterial({color:'#ffffff',roughness:.3});
   const ink=new THREE.MeshStandardMaterial({color:'#30203f',roughness:.3});
   const chassis=new THREE.MeshStandardMaterial({color:'#e3d8f3',roughness:.65});
@@ -23,6 +25,8 @@ export function createTrianglePet() {
   }
   const body=createSoftBody();
   mesh(pet,body.geometry,purple,0,0,0).name='triangle-body';
+  const fur=furry?createFur(body.geometry):undefined;
+  if(fur)pet.add(fur.mesh);
   root.add(createGroundShadow());
   const face=new THREE.Group(); face.name='pet-face'; pet.add(face);
   const eyes:THREE.Group[]=[];
@@ -69,10 +73,11 @@ export function createTrianglePet() {
   function update(seconds:number) {
     sampleWorkingPose(seconds*1000,pose);
     pet.rotation.z=-pose.tilt; pet.scale.set(pose.sx,pose.sy,1/Math.sqrt(pose.sx*pose.sy));
+    if(fur) {pet.updateWorldMatrix(true,false);fur.update(seconds,pet.matrixWorld);}
     face.position.set(pose.faceX*.008,-.18-pose.faceY*.008,0); face.scale.set(1,pose.eyeScale,1);
     for(const eye of eyes) {
       const x=face.position.x+eye.position.x,y=face.position.y;
-      eye.position.z=body.frontZ(x,y)+.018;
+      eye.position.z=body.frontZ(x,y)+(furry?.105:.018);
       const epsilon=.005;
       direction.set((body.frontZ(x-epsilon,y)-body.frontZ(x+epsilon,y))/(2*epsilon),
         (body.frontZ(x,y-epsilon)-body.frontZ(x,y+epsilon))/(2*epsilon)*pose.eyeScale,1).normalize();
@@ -96,5 +101,5 @@ export function createTrianglePet() {
   update(0);
   // Enclose all key travel even if the initial pose has a depressed key.
   keycaps.computeBoundingSphere(); activeKeys.frustumCulled=false;
-  return {content:root,update};
+  return {content:root,update,setProfile:(profile:Profile)=>fur?.setProfile(profile)};
 }

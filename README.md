@@ -34,11 +34,15 @@ The default scene is **Purple triangle · Working**, based on `~/Downloads/proje
 
 The body is a closed curved mesh, and the eyes follow its surface as it moves. The floor shadow uses one analytical transparent mesh, keeping the softness in every light-field view without shadow maps or per-frame blur work.
 
-To project it, select **Purple triangle · Working**, choose **Calibrated hologram**, then **Start output** after connecting the display and importing its calibration. The same live Three.js character is rendered from every light-field camera; this is not a flat sprite or a video. The scene selection and motion preference are saved by the native app.
+Choose **Furry triangle · Working** in the Scene menu for a fluffy lavender version. It adapts Alpha Bro Pets' groomed, tapered strand ribbons, clumping, curl and hair lighting to the Portrait. Fur stays short around the eyes, sways in analytical wind and trails body rotation and squash with a damped spring updated once per scene frame. Pause freezes the coat as well as typing. Eco, Balanced and Detail use 8,000, 16,000 and 24,000 strands respectively, switching density without reallocating geometry. This strand-only adaptation omits the reference app's shell stack and GPU physics passes to limit the cost of rendering every holographic view. The smooth triangle remains available, and either version projects through the same calibrated output path.
+
+The furry version uses a longer, draping coat with finer eight-segment fibers and softer root-to-tip shading. A damped spring responds to body acceleration, rotation and squash, with follow-through at the hair tips. Fur stays trimmed around the eyes and keyboard. Its state is updated once before all holographic views, and Pause freezes the body and coat together.
+
+To project either character, select **Purple triangle · Working** or **Furry triangle · Working**, choose **Calibrated hologram**, then **Start output** after connecting the display and importing its calibration. Use **Play working** to enable animation. The same live Three.js character is rendered from every light-field camera; this is not a flat sprite or a video. The scene selection and motion preference are saved by the native app.
 
 The **Scene** menu also offers the original Orbital study. You can load a **self-contained, uncompressed `.glb` under 64 MB**. Draco, KTX2 and Meshopt decoders are not bundled; external model resources are not supported. Imported model animation clips are not played; Play motion turns the model. Selecting a built-in scene leaves the imported model; Reset scene restores the paused purple triangle.
 
-For a custom web scene, replace `createScene()` in `src/scene.ts`, keeping its `{ scene, content, update(seconds) }` return contract, and rebuild. Put dynamic updates in `update`; the scheduler calls it once before all views, using a clock that stops when paused, hidden or suspended. Set animation only when needed, or call `scheduler.invalidate()` after a scene change. Your Three.js geometry, materials and shaders run directly in WebKit. DOM/CSS overlays do not become holograms.
+For a custom web scene, replace `createScene()` in `src/scene.ts`, keeping its `{ scene, content, update(seconds), setProfile(profile) }` return contract, and rebuild. `setProfile` can be a no-op if the scene does not vary with quality. Put dynamic updates in `update`; the scheduler calls it once before all views, using a clock that stops when paused, hidden or suspended. Set animation only when needed, or call `scheduler.invalidate()` after a scene change. Your Three.js geometry, materials and shaders run directly in WebKit. DOM/CSS overlays do not become holograms.
 
 For integration into another Three.js application, `src/renderer.ts` exposes the renderer independently:
 
@@ -85,7 +89,7 @@ No USB resets, power cycling, firmware writes, mode/refresh-rate flapping or aut
 
 ## Validation
 
-`npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources.
+All **10 automated tests** pass. `npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources. Fur tests cover deterministic coverage, normals and eye tapering, density changes, spring lag and settling, pause behavior and reuse of geometry attributes.
 
 `tests/browser-check.ts` renders synthetic view-coded quilts and compares real GPU output pixels with an independent CPU optical calculation for every quality profile. Readbacks exist only in this test. Run with browser-harness while the dev server is open:
 

@@ -30,7 +30,7 @@ function sanitize(raw:Partial<Settings>):Settings {
   return {
     profile: raw.profile && profiles[raw.profile]?raw.profile:'balanced', animate:raw.animate===true,
     mode: raw.mode && ['hologram','quilt','test'].includes(raw.mode)?raw.mode:'hologram',
-    scene:raw.scene==='orbital'?'orbital':'triangle',
+    scene:raw.scene==='orbital'||raw.scene==='furry'?raw.scene:'triangle',
     zoom:typeof raw.zoom==='number'?Math.min(1.5,Math.max(0.65,raw.zoom)):1,
     yaw:typeof raw.yaw==='number'&&Number.isFinite(raw.yaw)?raw.yaw:0,
     calibration:raw.calibration?parseCalibration(raw.calibration):null,
@@ -47,6 +47,7 @@ function update(patch:Partial<Settings>,broadcast=true) {
     refresh();
   }
   if(render) render.configure(effectiveProfile(),settings.calibration);
+  sceneState?.setProfile(effectiveProfile());
   syncActivity();
   if(settings.modelUrl!==loadedModel || (!settings.modelUrl&&settings.scene!==loadedScene)) void loadModel(settings.modelUrl);
   scheduler?.invalidate();
@@ -66,7 +67,7 @@ function report(message:string) {
 }
 function setupRenderer(canvas:HTMLCanvasElement) {
   try {
-    render=new PortraitRenderer(canvas); loadedScene=settings.scene; sceneState=createScene(loadedScene);
+    render=new PortraitRenderer(canvas); loadedScene=settings.scene; sceneState=createScene(loadedScene,effectiveProfile());
     render.configure(effectiveProfile(),settings.calibration);
     canvas.addEventListener('webglcontextlost',e=>{ e.preventDefault(); fatal=true; syncActivity(); report('The GPU context was lost. Stop and reopen the output to recover.'); send({type:'log',message:'WebGL context lost'}); });
     canvas.addEventListener('webglcontextrestored',()=>{ fatal=false; render?.configure(effectiveProfile(),settings.calibration); syncActivity(); scheduler?.invalidate(); });
@@ -76,9 +77,9 @@ function setupRenderer(canvas:HTMLCanvasElement) {
         const moving=settings.animate&&settings.mode!=='test';
         if(moving&&previousTime!==undefined) animationTime+=Math.min((now-previousTime)/1000,0.1);
         previousTime=moving?now:undefined;
-        sceneState.update(animationTime);
         sceneState.content.rotation.y=settings.yaw+(settings.modelUrl||settings.scene==='orbital'?animationTime*0.25:0);
         sceneState.content.rotation.x=0.12;
+        sceneState.update(animationTime);
         const box=canvas.getBoundingClientRect();
         render.render(sceneState.scene,output?settings.mode:'preview',output?1536:Math.max(1,Math.round(box.width)),output?2048:Math.max(1,Math.round(box.height)),settings.zoom);
         frameTotal=render.frames;
@@ -99,7 +100,7 @@ async function loadModel(url?:string) {
   if(!sceneState) return;
   if(!url) {
     disposeObject(sceneState.content);
-    loadedScene=settings.scene; sceneState=createScene(loadedScene); animationTime=0; previousTime=undefined;
+    loadedScene=settings.scene; sceneState=createScene(loadedScene,effectiveProfile()); animationTime=0; previousTime=undefined;
     scheduler?.invalidate();
     return;
   }
@@ -111,7 +112,7 @@ async function loadModel(url?:string) {
     result.scene.position.sub(center); const fit=1.65/Math.max(size.x/0.75,size.y,size.z); result.scene.scale.setScalar(fit); result.scene.position.multiplyScalar(fit);
     const group=new THREE.Group(); group.add(result.scene);
     disposeObject(sceneState.content); sceneState.scene.remove(sceneState.content);
-    sceneState.content=group; sceneState.update=()=>{}; sceneState.scene.add(group); animationTime=0; previousTime=undefined; scheduler?.invalidate();
+    sceneState.content=group; sceneState.update=()=>{}; sceneState.setProfile=()=>{}; sceneState.scene.add(group); animationTime=0; previousTime=undefined; scheduler?.invalidate();
   } catch(e) { report(`Could not load GLB: ${String(e)}. Use an uncompressed, self-contained .glb.`); }
 }
 
@@ -137,7 +138,7 @@ if(output) {
         <div class="cal-status" id="cal-status">Calibration needed for 3D output</div>
       </section>
       <section class="panel"><div class="section-label"><span>02</span><h2>Make it yours</h2></div>
-        <label for="scene">Scene</label><select id="scene"><option value="triangle">Purple triangle · Working</option><option value="orbital">Orbital study</option><option value="model" disabled>Imported GLB model</option></select>
+        <label for="scene">Scene</label><select id="scene"><option value="triangle">Purple triangle · Working</option><option value="furry">Furry triangle · Working</option><option value="orbital">Orbital study</option><option value="model" disabled>Imported GLB model</option></select>
         <div class="quality" role="group" aria-label="Rendering quality"><button data-profile="eco">Eco</button><button data-profile="balanced">Balanced</button><button data-profile="detail">Detail</button></div><p class="hint" id="quality-hint"></p>
         <label for="zoom">Framing <output id="zoom-value">100%</output></label><input id="zoom" type="range" min="0.65" max="1.5" step="0.01" value="1">
         <div class="button-row"><button id="model" class="secondary">Open GLB model</button><button id="reset" class="text-button">Reset scene</button></div><input id="model-file" type="file" accept=".glb" hidden>
@@ -193,12 +194,12 @@ function refresh() {
   const p=profiles[effectiveProfile()];
   const connection=document.querySelector('#connection')!;connection.textContent=host.presenting?'Output active':host.displays.some(d=>d.valid)?'Portrait connected':native?'Waiting for Portrait':'Browser preview';
   connection.classList.toggle('connected',host.presenting||host.displays.some(d=>d.valid));
-  const triangle=!settings.modelUrl&&settings.scene==='triangle';
+  const triangle=!settings.modelUrl&&settings.scene!=='orbital';
   document.querySelector('#animate')!.textContent=settings.animate?'Pause motion':triangle?'Play working':'Play motion';
   document.querySelector('#policy')!.textContent=settings.animate?`${p.fps} fps cap`:'On demand';
   document.querySelector('#view-count')!.textContent=String(p.columns*p.rows);
-  document.querySelector('#scene-name')!.textContent=settings.modelName??(triangle?'Purple triangle':'Orbital study');
-  document.querySelector('#scene-description')!.textContent=triangle?'Working · Alpha Bro Pets. Drag to turn.':'Drag to turn. A little depth goes a long way.';
+  document.querySelector('#scene-name')!.textContent=settings.modelName??(settings.scene==='furry'?'Furry triangle':triangle?'Purple triangle':'Orbital study');
+  document.querySelector('#scene-description')!.textContent=triangle?`${settings.scene==='furry'?'Fluffy lavender · ':''}Working · Alpha Bro Pets. Drag to turn.`:'Drag to turn. A little depth goes a long way.';
   (document.querySelector('#scene') as HTMLSelectElement).value=settings.modelUrl?'model':settings.scene;
   document.querySelector('#cal-status')!.textContent=settings.calibration?`Calibrated · ${settings.calibration.serial}`:'Calibration needed for 3D output';
   document.querySelector('#cal-status')!.classList.toggle('ready',!!settings.calibration);

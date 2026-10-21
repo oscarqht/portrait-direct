@@ -4,6 +4,7 @@ import * as THREE from 'three';
 import {PortraitRenderer} from '../src/renderer';
 import {parseCalibration,opticalUniforms,profiles} from '../src/calibration';
 import {createScene,disposeObject} from '../src/scene';
+import {furCounts} from '../src/fur';
 export function checkGPU() {
   const canvas=document.createElement('canvas');
   const renderer=new PortraitRenderer(canvas);
@@ -75,6 +76,49 @@ export function checkGPU() {
     renderer.render(scene,'test',1536,2048);
     const gl=renderer.renderer.getContext(),pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
     if(pixel[0]!==255||pixel[1]!==255||pixel[2]!==255)throw new Error('Static pattern border failed');
-    return {passed:true,profiles:results,defaultModelBounds,staticPattern:true};
+    const fur=checkFurGPU(renderer,calibration);
+    return {passed:true,profiles:results,defaultModelBounds,staticPattern:true,fur};
   } finally {renderer.dispose();geometry.dispose();material.dispose();}
+}
+
+function checkFurGPU(renderer:PortraitRenderer,calibration:ReturnType<typeof parseCalibration>) {
+  const furry=createScene('furry');
+  const coat=furry.content.getObjectByName('furry-coat') as THREE.Mesh<THREE.InstancedBufferGeometry,THREE.ShaderMaterial>;
+  const previousError=renderer.renderer.debug.onShaderError;
+  renderer.renderer.debug.onShaderError=(gl,_program,vertex,fragment)=>{throw new Error(`Fur shader failed: ${gl.getShaderInfoLog(vertex)} ${gl.getShaderInfoLog(fragment)}`);};
+  try {
+    furry.content.rotation.set(.12,.2,0);
+    for(let frame=1;frame<=11;frame++)furry.update(frame/30);
+    furry.update(.37);
+    const gl=renderer.renderer.getContext(),before=new Uint8Array(256*320*4),after=new Uint8Array(before.length);
+    coat.visible=false;renderer.render(furry.scene,'preview',256,320);gl.readPixels(0,0,256,320,gl.RGBA,gl.UNSIGNED_BYTE,before);
+    coat.visible=true;renderer.render(furry.scene,'preview',256,320);gl.readPixels(0,0,256,320,gl.RGBA,gl.UNSIGNED_BYTE,after);
+    let changedPixels=0;
+    for(let i=0;i<before.length;i+=4)if(Math.max(...[0,1,2].map(c=>Math.abs(before[i+c]-after[i+c])))>8)changedPixels++;
+    if(changedPixels<300)throw new Error('Fur pass did not change the rendered character.');
+    const lagNames=['uWebGLInertia','uAngularLag','uStretchLag'] as const;
+    const savedLag=lagNames.map(name=>(coat.material.uniforms[name].value as THREE.Vector3).clone());
+    lagNames.forEach(name=>(coat.material.uniforms[name].value as THREE.Vector3).set(0,0,0));
+    renderer.render(furry.scene,'preview',256,320);gl.readPixels(0,0,256,320,gl.RGBA,gl.UNSIGNED_BYTE,before);
+    lagNames.forEach((name,i)=>(coat.material.uniforms[name].value as THREE.Vector3).copy(savedLag[i]));
+    let motionPixels=0;
+    for(let i=0;i<before.length;i+=4)if(Math.max(...[0,1,2].map(c=>Math.abs(before[i+c]-after[i+c])))>8)motionPixels++;
+    if(motionPixels<20)throw new Error('Body-driven fur inertia did not change the rendered coat.');
+    const results=[];
+    for(const profile of ['eco','balanced','detail'] as const) {
+      furry.setProfile(profile);renderer.configure(profile,calibration);
+      const times:number[]=[];coat.onBeforeRender=()=>{
+        times.push(coat.material.uniforms.uTime.value);
+        lagNames.forEach((name,i)=>{if(!(coat.material.uniforms[name].value as THREE.Vector3).equals(savedLag[i]))throw new Error('Fur inertia changed between views');});
+      };
+      renderer.render(furry.scene,'hologram',1536,2048);
+      const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
+      const views=profiles[profile].columns*profiles[profile].rows;
+      if(times.length!==views||times.some(time=>time!==.37))throw new Error(`${profile}: fur pose changed between views`);
+      if(gl.getError()!==gl.NO_ERROR||pixel[0]!==255||pixel[1]!==255||pixel[2]!==255)throw new Error(`${profile}: fur output failed`);
+      if(coat.geometry.instanceCount!==furCounts[profile])throw new Error(`${profile}: wrong fur density`);
+      results.push({profile,views,strands:coat.geometry.instanceCount,poseFrozenAcrossViews:true});
+    }
+    return {passed:true,changedPixels,motionPixels,profiles:results};
+  } finally {renderer.renderer.debug.onShaderError=previousError;disposeObject(furry.content);}
 }
