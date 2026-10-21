@@ -69,3 +69,11 @@ Pending with hardware: correct device calibration, native pixel registration, RG
 - A native compositor snapshot visibly contains the model through the interlacer; evidence is in ignored `artifacts/native-output-reduced.{json,png,log}`. This verifies native rendering and a nonblack image, not optical quality observed on the physical panel. The test `--output-check` window leaves the physical Portrait available.
 - All 22 automated tests, TypeScript/production build, native packaging and strict code-signature verification pass. Added regressions cover large-file parser structure, external components, instance transforms and shared geometry, colors/material groups, malformed references and worker-compatible buffers.
 - Reopened the rebuilt app with the persisted real model and started calibrated output on the connected LKG-P20078 at 1536 × 2048. The control UI transitioned from Preparing output to Output active after the first model frame. Output was left active. Physical optical alignment still requires observing the panel.
+
+## Adjustable focal plane (2026-10-21)
+
+- `npm test`: 24/24 passing. New projection checks cover every view/profile at five yaw angles and 50%, 100%, 300% framing, plus fixed-depth disparity and stable central-preview framing.
+- `npm run build:app`: TypeScript, Vite, native compilation and ad-hoc signing pass.
+- Browser Harness / Chrome: picked a glass-character surface, dragged rotation and reloaded; the same local focus point persisted and its world depth changed with rotation. Imported `artifacts/tetrahedron.stl`, picked a visible face, then dragged: distance changed from 6.3184 to 6.8303 normalized units with the local focus point unchanged and no GL errors.
+- `checkFocusGPU()`: 18 camera-submission cases across all three profiles, three rotations and 50%/300% framing passed; maximum selected-point disparity was 1.56e-15 NDC. `checkGPU()` also passed the existing interlacing, quilt, fur and glass checks.
+- The new focal behavior has not been visually verified on a physical Portrait. The 2D preview shows a selection marker; focal depth affects multi-view convergence rather than adding simulated blur.

@@ -3,17 +3,18 @@ import * as THREE from 'three';
 import { loadImportedModel, modelFormat } from './model';
 import { parseCalibration, profiles, type Calibration, type Profile } from './calibration';
 import { PortraitRenderer, type OutputMode } from './renderer';
+import { cameraDistance, focalDistance, focusDepthLimit, setViewCamera, worldFocus, type FocusPoint } from './focus';
 import { FrameScheduler } from './scheduler';
 import { createScene, disposeObject, type SceneKind } from './scene';
 
-interface Settings { profile:Profile; animate:boolean; mode:OutputMode; scene:SceneKind; zoom:number; yaw:number; calibration:Calibration|null; modelUrl?:string; modelName?:string }
+interface Settings { profile:Profile; animate:boolean; mode:OutputMode; scene:SceneKind; zoom:number; yaw:number; focusDepth:number; focusPoint?:FocusPoint; calibration:Calibration|null; modelUrl?:string; modelName?:string }
 interface Display { id:number; name:string; width:number; height:number; builtIn:boolean; mirrored:boolean; valid:boolean; reason:string }
 interface Host { displays:Display[]; presenting:boolean; outputReady?:boolean; lowPower:boolean; suspended:boolean; events:string[]; settings?:Settings; message?:string }
 declare global { interface Window { webkit?:{messageHandlers:{portrait:{postMessage:(data:unknown)=>void}}}; portraitReceive?:(event:any)=>void; portraitDebug?:()=>unknown } }
 const native=!!window.webkit?.messageHandlers.portrait;
 const output=new URLSearchParams(location.search).has('output');
 const app=document.querySelector<HTMLDivElement>('#app')!;
-let settings:Settings={profile:'balanced',animate:false,mode:'hologram',scene:'triangle',zoom:1,yaw:0,calibration:null};
+let settings:Settings={profile:'balanced',animate:false,mode:'hologram',scene:'triangle',zoom:1,yaw:0,focusDepth:0,calibration:null};
 try { const saved=JSON.parse(localStorage.getItem('portrait-settings')??'null'); if(saved) settings=sanitize(saved); } catch { /* Optional cache; native host also persists settings. */ }
 let host:Host={displays:[],presenting:false,lowPower:false,suspended:false,events:[]};
 let selectedDisplay:number|undefined;
@@ -21,7 +22,10 @@ let render:PortraitRenderer|undefined;
 let scheduler:FrameScheduler|undefined;
 let sceneState:ReturnType<typeof createScene>|undefined;
 let modelToken=0, loadedModel:string|undefined, loadedScene:SceneKind='triangle', frameTotal=0, previousTime:number|undefined;
-let animationTime=0, fatal=false;
+let animationTime=0, fatal=false, pickingFocus=false;
+let currentFocusDepth=0;
+const focusCamera=new THREE.PerspectiveCamera(18,.75,.1,100);
+const focusRay=new THREE.Raycaster();
 let modelLoad:AbortController|undefined, modelLoading=false, modelError='', installedModel:string|undefined, outputReady=false;
 let modelLoadMs=0, modelStarted=0;
 const channel=!native && 'BroadcastChannel' in window?new BroadcastChannel('portrait-direct'):null;
@@ -34,6 +38,8 @@ function sanitize(raw:Partial<Settings>):Settings {
     scene:raw.scene==='orbital'||raw.scene==='furry'||raw.scene==='glass'?raw.scene:'triangle',
     zoom:typeof raw.zoom==='number'&&Number.isFinite(raw.zoom)?Math.min(3,Math.max(0.5,raw.zoom)):1,
     yaw:typeof raw.yaw==='number'&&Number.isFinite(raw.yaw)?raw.yaw:0,
+    focusDepth:typeof raw.focusDepth==='number'&&Number.isFinite(raw.focusDepth)?Math.min(focusDepthLimit,Math.max(-focusDepthLimit,raw.focusDepth)):0,
+    focusPoint:Array.isArray(raw.focusPoint)&&raw.focusPoint.length===3&&raw.focusPoint.every(v=>typeof v==='number'&&Number.isFinite(v)&&Math.abs(v)<=10)?[...raw.focusPoint] as FocusPoint:undefined,
     calibration:raw.calibration?parseCalibration(raw.calibration):null,
     modelUrl:typeof raw.modelUrl==='string'&&(raw.modelUrl.startsWith('blob:')||/^portrait:\/\/app\/model\.(glb|stl|3mf)$/.test(raw.modelUrl))?raw.modelUrl:undefined,
     modelName:typeof raw.modelName==='string'?raw.modelName:undefined,
@@ -41,9 +47,12 @@ function sanitize(raw:Partial<Settings>):Settings {
 }
 function effectiveProfile() { return host.lowPower?'eco':settings.profile; }
 function update(patch:Partial<Settings>,broadcast=true) {
+  if(!('focusPoint' in patch)&&(('modelUrl' in patch&&patch.modelUrl!==settings.modelUrl)||('scene' in patch&&patch.scene!==settings.scene))) {
+    patch={...patch,focusDepth:0,focusPoint:undefined};pickingFocus=false;
+  }
   settings=sanitize({...settings,...patch});
   if (!output) {
-    try { localStorage.setItem('portrait-settings',JSON.stringify({...settings,modelUrl:undefined,modelName:undefined})); } catch { /* private storage unavailable */ }
+    try { localStorage.setItem('portrait-settings',JSON.stringify({...settings,modelUrl:undefined,modelName:undefined,focusPoint:settings.modelUrl?.startsWith('blob:')?undefined:settings.focusPoint})); } catch { /* private storage unavailable */ }
     if(broadcast) { send({type:'settings',settings}); channel?.postMessage({type:'settings',settings}); }
     refresh();
   }
@@ -81,8 +90,11 @@ function setupRenderer(canvas:HTMLCanvasElement) {
         sceneState.content.rotation.y=settings.yaw+(settings.modelUrl||settings.scene==='orbital'?animationTime*0.25:0);
         sceneState.content.rotation.x=0.12;
         sceneState.update(animationTime);
+        sceneState.content.updateWorldMatrix(true,false);
+        currentFocusDepth=settings.focusPoint?worldFocus(sceneState.content,settings.focusPoint).z:settings.focusDepth;
         const box=canvas.getBoundingClientRect();
-        render.render(sceneState.scene,output?settings.mode:'preview',output?1536:Math.max(1,Math.round(box.width)),output?2048:Math.max(1,Math.round(box.height)),settings.zoom);
+        if(!output) refreshFocus(box.width/box.height);
+        render.render(sceneState.scene,output?settings.mode:'preview',output?1536:Math.max(1,Math.round(box.width)),output?2048:Math.max(1,Math.round(box.height)),settings.zoom,currentFocusDepth);
         frameTotal=render.frames;
         if(output&&!outputReady&&!modelLoading&&!modelError&&(!settings.modelUrl||installedModel===settings.modelUrl)) {
           outputReady=true;setLoadingMessage('');send({type:'outputReady'});
@@ -150,7 +162,7 @@ if(output) {
   app.innerHTML=`
     <header><div class="brand"><span class="mark">▱</span><div>Portrait <b>Direct</b><small>LIGHT FIELD · LOCAL FIRST</small></div></div><span class="pill" id="connection">Preview mode</span></header>
     <main><section class="stage"><div class="stage-top"><span class="eyebrow">YOUR SPACE, IN THREE DIMENSIONS</span><span class="live-dot"></span></div>
-      <div class="canvas-wrap"><canvas id="preview" aria-label="Interactive 3D preview"></canvas><div class="preview-badge">2D PREVIEW</div><div id="model-loading" class="model-loading" role="status" hidden></div><div id="presenting-cover" hidden>Rendering on your Portrait<span>Laptop preview is sleeping to save energy.</span></div></div>
+      <div class="canvas-wrap"><canvas id="preview" aria-label="Interactive 3D preview"></canvas><div class="preview-badge">2D PREVIEW</div><div id="focus-marker" class="focus-marker" hidden aria-hidden="true"></div><div id="model-loading" class="model-loading" role="status" hidden></div><div id="presenting-cover" hidden>Rendering on your Portrait<span>Laptop preview is sleeping to save energy.</span></div></div>
       <div class="stage-bottom"><div><span class="eyebrow">NOW SHOWING</span><h1 id="scene-name">Purple triangle</h1><p id="scene-description">A little focus, a lot of typing. Drag to turn.</p></div><button id="animate" class="secondary">Play working</button></div>
       <div class="metrics"><div><small>RENDER POLICY</small><strong id="policy">On demand</strong></div><div><small>VIEWS / FRAME</small><strong id="view-count">48</strong></div><div><small>CPU SUBMISSION</small><strong id="submit">—</strong></div><div><small>PREVIEW FRAMES</small><strong id="frames">0</strong></div></div>
       <p id="notice" role="alert"></p>
@@ -164,6 +176,9 @@ if(output) {
         <label for="scene">Scene</label><select id="scene"><option value="triangle">Purple triangle · Working</option><option value="furry">Furry triangle · Working</option><option value="glass">Liquid glass triangle · Working</option><option value="orbital">Orbital study</option><option value="model" disabled>Imported model</option></select>
         <div class="quality" role="group" aria-label="Rendering quality"><button data-profile="eco">Eco</button><button data-profile="balanced">Balanced</button><button data-profile="detail">Detail</button></div><p class="hint" id="quality-hint"></p>
         <label for="zoom">Framing <output id="zoom-value">100%</output></label><input id="zoom" type="range" min="0.5" max="3" step="0.01" value="1">
+        <label for="focus-depth">Focal plane <output id="focus-value"></output></label><input id="focus-depth" type="range" min="-2" max="2" step="0.01" value="0" aria-describedby="focus-hint">
+        <p class="hint" id="focus-hint">Move toward the back (left) or front (right). Pick a point to keep it in focus as the model turns.</p>
+        <div class="button-row"><button id="pick-focus" aria-pressed="false">Pick focus point</button><button id="reset-focus" class="text-button">Center focus</button></div>
         <div class="button-row"><button id="model" class="secondary">Open 3D model</button><button id="reset" class="text-button">Reset scene</button></div><input id="model-file" type="file" accept=".glb,.stl,.3mf" hidden>
       </section>
       <section class="panel"><div class="section-label"><span>03</span><h2>Send to the glass</h2></div><label for="mode">Output</label><select id="mode"><option value="hologram">Calibrated hologram</option><option value="quilt">Quilt inspection</option><option value="test">Static connection test</option></select>
@@ -185,6 +200,15 @@ if(output) {
     update({scene:(e.target as HTMLSelectElement).value as SceneKind,modelUrl:undefined,modelName:undefined,yaw:0});
   });
   document.querySelector('#zoom')!.addEventListener('input',e=>update({zoom:Number((e.target as HTMLInputElement).value)}));
+  document.querySelector('#focus-depth')!.addEventListener('input',e=>{
+    pickingFocus=false;update({focusDepth:Number((e.target as HTMLInputElement).value),focusPoint:undefined});
+  });
+  document.querySelector('#pick-focus')!.addEventListener('click',()=>{
+    pickingFocus=!pickingFocus;refreshFocus();
+  });
+  document.querySelector('#reset-focus')!.addEventListener('click',()=>{
+    pickingFocus=false;update({focusDepth:0,focusPoint:undefined});
+  });
   document.querySelector('#mode')!.addEventListener('change',e=>update({mode:(e.target as HTMLSelectElement).value as OutputMode}));
   document.querySelector('#model')!.addEventListener('click',()=>native?send({type:'importModel'}):(document.querySelector('#model-file') as HTMLInputElement).click());
   document.querySelector('#model-file')!.addEventListener('change',e=>{
@@ -196,8 +220,8 @@ if(output) {
   });
   document.querySelector('#reset')!.addEventListener('click',()=>{
     if(settings.modelUrl?.startsWith('blob:')) URL.revokeObjectURL(settings.modelUrl);
-    animationTime=0; previousTime=undefined;
-    update({scene:'triangle',modelUrl:undefined,modelName:undefined,yaw:0,zoom:1,animate:false});
+    animationTime=0; previousTime=undefined;pickingFocus=false;
+    update({scene:'triangle',modelUrl:undefined,modelName:undefined,yaw:0,zoom:1,focusDepth:0,focusPoint:undefined,animate:false});
   });
   document.querySelector('#display')!.addEventListener('change',e=>{selectedDisplay=Number((e.target as HTMLSelectElement).value);refresh();});
   document.querySelector('#present')!.addEventListener('click',()=>send(host.presenting?{type:'stop'}:{type:'present',displayId:selectedDisplay}));
@@ -207,7 +231,26 @@ if(output) {
   });
   const canvas=document.querySelector<HTMLCanvasElement>('#preview')!;
   let dragging=false, x=0;
-  canvas.onpointerdown=e=>{dragging=true;x=e.clientX;canvas.setPointerCapture(e.pointerId);};
+  canvas.onpointerdown=e=>{
+    if(pickingFocus&&sceneState) {
+      const box=canvas.getBoundingClientRect();
+      setViewCamera(focusCamera,cameraDistance(settings.zoom),0,box.width/box.height,focalDistance(settings.zoom,currentFocusDepth));
+      sceneState.content.updateWorldMatrix(true,true);
+      focusRay.setFromCamera(new THREE.Vector2((e.clientX-box.left)/box.width*2-1,1-(e.clientY-box.top)/box.height*2),focusCamera);
+      const hit=focusRay.intersectObject(sceneState.content,true).find(hit=>{
+        let object:THREE.Object3D|null=hit.object;
+        while(object&&object!==sceneState!.content) {if(!object.visible||object.name==='glass-gray-grid')return false;object=object.parent;}
+        return object?.visible;
+      });
+      if(hit) {
+        pickingFocus=false;
+        const point=sceneState.content.worldToLocal(hit.point.clone());
+        update({focusPoint:point.toArray() as FocusPoint});
+      } else document.querySelector('#focus-hint')!.textContent='Click a visible surface of the model, or cancel picking.';
+      return;
+    }
+    dragging=true;x=e.clientX;canvas.setPointerCapture(e.pointerId);
+  };
   canvas.onpointermove=e=>{if(dragging){const dx=e.clientX-x;x=e.clientX;update({yaw:settings.yaw+dx*0.008});}};
   canvas.onpointerup=canvas.onpointercancel=()=>{dragging=false;};
   refresh();
@@ -215,6 +258,7 @@ if(output) {
 
 function refresh() {
   if(output)return;
+  refreshFocus();
   const p=profiles[effectiveProfile()];
   const connection=document.querySelector('#connection')!;connection.textContent=host.presenting?(host.outputReady?'Output active':'Preparing output'):host.displays.some(d=>d.valid)?'Portrait connected':native?'Waiting for Portrait':'Browser preview';
   connection.classList.toggle('connected',host.presenting||host.displays.some(d=>d.valid));
@@ -247,6 +291,26 @@ function refresh() {
   document.querySelector('#device-help')!.textContent=native?'Use HDMI + USB power. Set the Portrait as an extended 1536 × 2048 display.':'Explore the scene here. Open Portrait Direct.app to discover displays and project to the device.';
   document.querySelector('#events')!.textContent=host.events.length?host.events.join('\n'):'No hardware connected. No hardware fix has been verified.';
 }
+function refreshFocus(aspect?:number) {
+  const depth=settings.focusPoint?currentFocusDepth:settings.focusDepth;
+  (document.querySelector('#focus-depth') as HTMLInputElement).value=String(depth);
+  document.querySelector('#focus-value')!.textContent=`${focalDistance(settings.zoom,depth).toFixed(2)} units away`;
+  const button=document.querySelector<HTMLButtonElement>('#pick-focus')!;
+  button.textContent=pickingFocus?'Cancel picking':settings.focusPoint?'Pick another point':'Pick focus point';
+  button.setAttribute('aria-pressed',String(pickingFocus));
+  button.disabled=modelLoading||host.presenting;
+  document.querySelector('#focus-hint')!.textContent=pickingFocus?'Click a surface in the preview to focus on it.':settings.focusPoint?'Focus follows the selected point as the model turns.':'Back ← → Front. Pick a point to follow it as the model turns. Focus changes depth in 3D output; the 2D view stays sharp.';
+  const canvas=document.querySelector<HTMLCanvasElement>('#preview')!;
+  canvas.style.cursor=pickingFocus?'crosshair':'grab';
+  const marker=document.querySelector<HTMLElement>('#focus-marker')!;
+  marker.hidden=!settings.focusPoint;
+  if(settings.focusPoint&&sceneState) {
+    setViewCamera(focusCamera,cameraDistance(settings.zoom),0,aspect??canvas.clientWidth/canvas.clientHeight,focalDistance(settings.zoom,depth));
+    const point=worldFocus(sceneState.content,settings.focusPoint).project(focusCamera);
+    marker.hidden=Math.abs(point.x)>1||Math.abs(point.y)>1||Math.abs(point.z)>1;
+    marker.style.left=`${(point.x+1)*50}%`;marker.style.top=`${(1-point.y)*50}%`;
+  }
+}
 window.portraitReceive=(event)=>{
   try {
     if(event.type==='host') {
@@ -266,6 +330,6 @@ window.portraitReceive=(event)=>{
 channel?.addEventListener('message',e=>{if(e.data.type==='settings'&&output)update(e.data.settings,false);});
 document.addEventListener('visibilitychange',syncActivity);
 window.addEventListener('pagehide',()=>{modelLoad?.abort();scheduler?.dispose();render?.dispose();if(sceneState)disposeObject(sceneState.content);channel?.close();});
-window.portraitDebug=()=>({frames:frameTotal,modelLoading,modelError,modelLoaded:!!settings.modelUrl&&installedModel===settings.modelUrl,modelLoadMs,outputReady,submitMs:render?.lastSubmitMs,profile:effectiveProfile(),scene:settings.modelUrl?'model':settings.scene,animationTime,animate:settings.animate,output,native,hidden:document.hidden,calibrated:!!settings.calibration,glError:render?.renderer.getContext().getError()});
+window.portraitDebug=()=>({frames:frameTotal,modelLoading,modelError,modelLoaded:!!settings.modelUrl&&installedModel===settings.modelUrl,modelLoadMs,outputReady,submitMs:render?.lastSubmitMs,profile:effectiveProfile(),focusDepth:currentFocusDepth,focusDistance:focalDistance(settings.zoom,currentFocusDepth),focusPoint:settings.focusPoint,pickingFocus,scene:settings.modelUrl?'model':settings.scene,animationTime,animate:settings.animate,output,native,hidden:document.hidden,calibrated:!!settings.calibration,glError:render?.renderer.getContext().getError()});
 if(native)send({type:'ready',output});
 

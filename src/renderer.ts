@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { type Calibration, type Profile, profiles, opticalUniforms, viewOffset } from './calibration';
 import {createGlassEnvironment} from './glass';
+import {cameraDistance, focalDistance, setViewCamera} from './focus';
 export type OutputMode = 'hologram' | 'quilt' | 'test' | 'preview';
 // Original, single-pass lenticular interlacer. RGB channels sample their own view.
 // Tile coordinates are clamped by half a texel to avoid bleeding adjacent views.
@@ -95,7 +96,7 @@ export class PortraitRenderer {
       for (const [key, value] of Object.entries({center:calibration.center,invView:calibration.invView,flipX:calibration.flipImageX,flipY:calibration.flipImageY,flipSubp:calibration.flipSubp})) this.material.uniforms[key].value=value;
     }
   }
-  render(scene: THREE.Scene, mode: OutputMode, width: number, height: number, zoom = 1) {
+  render(scene: THREE.Scene, mode: OutputMode, width: number, height: number, zoom = 1, focusDepth = 0) {
     if (mode === 'hologram' && !this.calibration) throw new Error('Import your Portrait calibration before holographic output.');
     const begin = performance.now();
     if (this.canvas.width !== width || this.canvas.height !== height) this.renderer.setSize(width,height,false);
@@ -118,7 +119,7 @@ export class PortraitRenderer {
         });
       }
     }
-    const camera=this.camera, distance=10/zoom;
+    const camera=this.camera, distance=cameraDistance(zoom), focus=focalDistance(zoom,focusDepth);
     scene.updateMatrixWorld(true);
     const oldAuto=scene.matrixWorldAutoUpdate; scene.matrixWorldAutoUpdate=false;
     try {
@@ -128,15 +129,8 @@ export class PortraitRenderer {
         r.setScissorTest(false); r.setViewport(0,0,preview?width:this.target.width,preview?height:this.target.height); r.clear();
         const n=preview?1:count;
         for(let i=0;i<n;i++) {
-          const offset=preview?0:viewOffset(i,count,distance,this.calibration?.viewCone ?? 40);
-          camera.position.set(offset,0,distance);
-          // Parallel off-axis frusta converge at z=0; toe-in cameras distort depth.
-          const near=camera.near, halfY=near*Math.tan(THREE.MathUtils.degToRad(camera.fov/2));
-          const aspect=preview?width/height:0.75;
-          const midpoint=-near*offset/distance;
-          camera.projectionMatrix.makePerspective(midpoint-halfY*aspect,midpoint+halfY*aspect,halfY,-halfY,near,camera.far);
-          camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-          camera.updateMatrixWorld(true);
+          const offset=preview?0:viewOffset(i,count,focus,this.calibration?.viewCone ?? 40);
+          setViewCamera(camera,distance,offset,preview?width/height:0.75,focus);
           const x=preview?0:(i%p.columns)*p.tileW, y=preview?0:Math.floor(i/p.columns)*p.tileH;
           const w=preview?width:p.tileW, h=preview?height:p.tileH;
           r.setViewport(x,y,w,h);

@@ -46,6 +46,8 @@ To project a character, select its style in **Scene**, choose **Calibrated holog
 
 The **Scene** menu also offers the original Orbital study. You can load a **self-contained `.glb`, `.stl` or `.3mf` under 64 MB** in the browser preview or native app. GLB must be uncompressed. Both ASCII and binary STL are supported, with a default material for files without colors. STL and 3MF use the conventional Z-up printing orientation and are fitted to the preview. Framing ranges from **50–300%**. Draco, KTX2 and Meshopt decoders are not bundled; external model resources are not supported. Core 3MF meshes, production component references, transforms and colors are parsed off the UI thread into indexed geometry. STL parsing also runs in a worker. Loading shows its current stage and can be cancelled with Reset scene or a scene change. Advanced 3MF features use the bundled Three.js loader; vendor-specific slicer extensions may not render fully. Imported model animation clips are not played; Play motion turns the model. Selecting a built-in scene leaves the imported model; Reset scene restores the paused purple triangle.
 
+Use **Focal plane** to move the sharpest holographic plane toward the back or front of the model, independently of Framing and rotation. **Pick focus point** lets you click a visible model surface in the preview; that point stays on the zero-parallax plane as you drag or play rotation. The blue ring marks the selection. Moving the slider returns to a fixed depth; **Center focus** restores the model-center plane. Focus settings persist and sync to the output window. Changing models or scenes resets focus. The 2D preview stays sharp at every depth; inspect the depth effect on the Portrait or in the quilt. Distances use normalized scene units, not millimeters from the source file.
+
 For a custom web scene, replace `createScene()` in `src/scene.ts`, keeping its `{ scene, content, update(seconds), setProfile(profile) }` return contract, and rebuild. `setProfile` can be a no-op if the scene does not vary with quality. Put dynamic updates in `update`; the scheduler calls it once before all views, using a clock that stops when paused, hidden or suspended. Set animation only when needed, or call `scheduler.invalidate()` after a scene change. Your Three.js geometry, materials and shaders run directly in WebKit. DOM/CSS overlays do not become holograms.
 
 For integration into another Three.js application, `src/renderer.ts` exposes the renderer independently:
@@ -55,11 +57,11 @@ import { PortraitRenderer } from './src/renderer';
 import { parseCalibration } from './src/calibration';
 const display = new PortraitRenderer(canvas);
 display.configure('balanced', parseCalibration(myVisualJson));
-display.render(myThreeScene, 'hologram', 1536, 2048);
+display.render(myThreeScene, 'hologram', 1536, 2048, 1, 0); // zoom, focal-plane world z
 // Re-render when the scene changes; dispose() when closing.
 ```
 
-The scene's screen/convergence plane is z=0, camera axis is +z looking toward -z. The vertical field at default framing is about 3.17 scene units, with 0.75 aspect on the Portrait. Cameras use parallel, off-axis frusta. Existing arbitrary websites/iframes cannot be converted to light fields from their 2D pixels: their scene/render loop needs integration. This is not a WebXR drop-in polyfill.
+The scene's screen/convergence plane defaults to z=0; the final render argument moves it along world z. For a selected local model point, transform it to world space after rotation and pass its z coordinate each frame. The camera axis is +z looking toward -z. The vertical field at default framing is about 3.17 scene units, with 0.75 aspect on the Portrait. Cameras use parallel, off-axis frusta. Existing arbitrary websites/iframes cannot be converted to light fields from their 2D pixels: their scene/render loop needs integration. This is not a WebXR drop-in polyfill.
 
 ## Energy and performance design
 
@@ -75,12 +77,18 @@ The shown timing is **CPU submission**, not GPU execution or end-to-end latency.
 
 ## Validation
 
-All **22 automated tests** pass. `npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources. Fur tests cover deterministic coverage, normals and eye tapering, density changes, spring lag and settling, pause behavior and reuse of geometry attributes.
+All **24 automated tests** pass. `npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources. Fur tests cover deterministic coverage, normals and eye tapering, density changes, spring lag and settling, pause behavior and reuse of geometry attributes.
 
 `tests/browser-check.ts` renders synthetic view-coded quilts and compares real GPU output pixels with an independent CPU optical calculation for every quality profile. Glass checks verify visible grid refraction and compare the first, middle and last quilt views against independently rendered cameras in each profile, allowing small rasterization differences at high-contrast edges. Readbacks exist only in this test. Run with browser-harness while the dev server is open:
 
 ```python
 print(js('(async()=>JSON.stringify((await import("/tests/browser-check.ts")).checkGPU()))()'))
+```
+
+Focal-plane camera integration across rotation, framing and every quality profile:
+
+```python
+print(js('(async()=>JSON.stringify((await import("/tests/focus-browser-check.ts")).checkFocusGPU()))()'))
 ```
 
 Native WebKit preview, idle and GPU checks (no device needed):
