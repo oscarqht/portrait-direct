@@ -2,7 +2,7 @@
 
 A small native macOS app and Three.js light-field renderer for the **original Looking Glass Portrait (1536 × 2048)**. Uses Cocoa + the system WebKit GPU process; no Electron, Bridge service, Studio, cloud, video encoding, or framebuffer readbacks in the rendering path.
 
-This is an experimental user-space renderer, not a kernel driver or device firmware. macOS still handles HDMI. **A Portrait has not been connected or tested yet.** Correct optical alignment, refresh stability, comparative speed and battery savings remain unverified on hardware. A faulty power source, HDMI adapter, connector or cable cannot be repaired by this app.
+**Tested on a connected Looking Glass Portrait and confirmed working well.** Calibrated hologram output has been exercised at unmirrored 1536 × 2048 / 60 Hz, including the smooth and furry animated characters. This remains an experimental user-space renderer; macOS handles HDMI. Comparative speed and battery savings have not been benchmarked.
 
 ## Run
 
@@ -26,7 +26,7 @@ For browser preview, use `npm run dev`, then open the printed localhost URL. Bro
 3. Choose **Import calibration**. Select `Visual.json` (sometimes `visual.json`) from `LKG_Calibration` on the Portrait's mounted drive, or your saved copy. If the drive/file is unavailable, the vendor documents exporting it using Bridge once. This app does not implement a USB calibration protocol or use invented default calibration. Check that the serial shown matches your device; matching the calibration to an HDMI display is manual.
 4. Select the display. Try **Static connection test** first; it needs no calibration. If stable, choose **Calibrated hologram**, then **Start output**. Press Escape or Stop output to close it.
 
-The app deliberately does not start output automatically after a disconnect. A change to display geometry or mirroring stops output. The native output window covers the panel without borders. Native-pixel mapping still needs physical confirmation with the test pattern. macOS colour transforms, Night Shift or third-party display tools can affect optical output; disable those on the Portrait during alignment checks.
+The app deliberately does not start output automatically after a disconnect. A change to display geometry or mirroring stops output. The native output window covers the panel without borders. Use the static test pattern to check native-pixel mapping when setting up a different display or adapter. macOS colour transforms, Night Shift or third-party display tools can affect optical output; disable those on the Portrait during alignment checks.
 
 ## Web 3D content
 
@@ -69,24 +69,6 @@ Motion is off by default. Static content sleeps after its dirty frame. A timer p
 
 The shown timing is **CPU submission**, not GPU execution or end-to-end latency. Initial shader compilation can produce a slow first frame. No claim of outperforming Bridge/Studio or measured battery savings is made. The panel continues consuming power and receiving HDMI scanout even when scene rendering sleeps. For comparisons, use the same scene and panel mode, then measure sustained GPU time, frame cadence, total process memory and battery/energy use after warm-up.
 
-## Blinking investigation
-
-First distinguish the **side status LED** blinking from the **picture going black**. Record the LED colour and whether the device reboots, macOS loses the external display, or the picture alone cuts out.
-
-1. Run the static pattern for several minutes. It renders once, removing continuous 3D rendering as a variable. If it still blinks, investigate below; this does not alone prove a cable fault.
-2. Test the supplied USB-C wall adapter with HDMI still connected, as described in the vendor's desktop-mode instructions. This powers the panel separately from the laptop and can help distinguish laptop USB power delivery from other causes. Do not add an unverified splitter or simultaneously connect competing power sources.
-3. Compare direct HDMI with your adapter path. Try one known-good HDMI cable, then one USB-C cable, changing one variable at a time. Keep the same resolution/refresh rate throughout each comparison.
-4. Watch the native connection log. Disconnect/mode events suggest signal or topology changes; a panel can blink without sending an OS event, so an empty log does not prove stability.
-5. Save a diagnostic report. For USB/display/battery snapshots before and during reproduction:
-
-```sh
-python3 scripts/capture-hardware.py artifacts/connected.json
-```
-
-The hardware snapshot is local and includes device serials. It cannot measure USB voltage, cable integrity or visible blackouts. A red status flash is documented as insufficient power; yellow can indicate a mode-switch attempt. Confirm the exact state against the vendor guide rather than diagnosing from "blinking" alone.
-
-No USB resets, power cycling, firmware writes, mode/refresh-rate flapping or automatic restart loops are used. Persistent faults with the static pattern and stable power require hardware-side investigation.
-
 ## Validation
 
 All **10 automated tests** pass. `npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources. Fur tests cover deterministic coverage, normals and eye tapering, density changes, spring lag and settling, pause behavior and reuse of geometry attributes.
@@ -106,13 +88,14 @@ node scripts/build-gpu-check.mjs
   --gpu-check "$PWD/artifacts/gpu-test/gpu-check.js"
 ```
 
-Reports and a native WebKit snapshot are saved beside the chosen prefix. These verify software only. The pending physical acceptance test is: device-specific calibration; pixel registration; correct left-to-right depth and RGB alignment; start/stop; unplug/replug; sleep/wake; several minutes of static and animated output; the reported blinking; and measured energy/performance against the same reference scene.
+Reports and a native WebKit snapshot are saved beside the chosen prefix. These automated checks verify software rendering; connected-device testing has also exercised calibrated output with both characters, and the Portrait is confirmed working well. Recorded Chrome and native WebKit GPU checks pass for all quality profiles, including the fur shader, with zero sampled 8-bit error in the synthetic interlacing fixture.
+
+Extended unplug/replug and sleep/wake testing, long-duration stability measurements and controlled energy/performance comparisons remain separate follow-up work. See [`VALIDATION.md`](VALIDATION.md) for the dated implementation and test history; its earlier hardware-pending notes describe the observations available at those stages.
 
 Local settings and the imported model are stored in `~/Library/Application Support/Portrait Direct/`. Nothing is sent over the network by the bundled app. See `THIRD_PARTY_NOTICES.md` for licenses.
 
 ## Primary references
 
 - [Portrait setup](https://lfdocs.lookingglassfactory.com/getting-started/portrait/get-started-with-looking-glass-portrait)
-- [Portrait power, LEDs and calibration troubleshooting](https://lfdocs.lookingglassfactory.com/getting-started/portrait/troubleshooting)
 - [macOS display settings and pixel resolution](https://lfdocs.lookingglassfactory.com/software/looking-glass-bridge/display-settings-on-macos)
 - [Looking Glass WebXR source](https://github.com/Looking-Glass/looking-glass-webxr)
