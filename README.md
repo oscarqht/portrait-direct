@@ -1,5 +1,7 @@
 # Portrait Direct
 
+![Portrait Direct displaying a purple glass character on a Looking Glass Portrait](docs/images/portrait-direct-poster.jpeg)
+
 A small native macOS app and Three.js light-field renderer for the **original Looking Glass Portrait (1536 × 2048)**. Uses Cocoa + the system WebKit GPU process; no Electron, Bridge service, Studio, cloud, video encoding, or framebuffer readbacks in the rendering path.
 
 **Tested on a connected Looking Glass Portrait and confirmed working well.** Calibrated hologram output has been exercised at unmirrored 1536 × 2048 / 60 Hz, including the smooth and furry animated characters. This remains an experimental user-space renderer; macOS handles HDMI. Comparative speed and battery savings have not been benchmarked.
