@@ -61,7 +61,7 @@ export function checkGPU() {
       let minX=1536,minY=2048,maxX=-1,maxY=-1;
       for(let y=0;y<2048;y+=8)for(let x=0;x<1536;x+=8) {
         const i=(y*1536+x)*4;
-        if(Math.max(Math.abs(pixels[i]-8),Math.abs(pixels[i+1]-13),Math.abs(pixels[i+2]-21))>20) {
+        if(Math.max(255-pixels[i],255-pixels[i+1],255-pixels[i+2])>25) {
           minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);
         }
       }
@@ -70,6 +70,7 @@ export function checkGPU() {
       defaultModelBounds={centerX,centerY,width,height};
       if(Math.abs(centerX-.5)>.1||Math.abs(centerY-.5)>.1||width<.5||height<.4)
         throw new Error(`Default hologram is off-center or too small: ${JSON.stringify(defaultModelBounds)}`);
+      if(pixels[0]!==255||pixels[1]!==255||pixels[2]!==255)throw new Error('White studio background failed');
     } finally {disposeObject(orbital.content);}
     renderer.render(scene,'test',1536,2048);
     const gl=renderer.renderer.getContext(),pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);

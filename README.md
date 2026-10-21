@@ -30,9 +30,15 @@ The app deliberately does not start output automatically after a disconnect. A c
 
 ## Web 3D content
 
-The sample is a real Three.js scene, not a video. You can load a **self-contained, uncompressed `.glb` under 64 MB**. Draco, KTX2 and Meshopt decoders are not bundled; external model resources are not supported. Model animation clips are not played; Play motion turns the model.
+The default scene is **Purple triangle · Working**, based on `~/Downloads/projects/alpha-bro-pets`: its rounded triangle outline and smooth 820 ms typing cycle. The character has an inflated lavender body, small glossy eyes and rounded hands and keyboard, lit against a white studio background with a soft floor shadow. Choose **Play working** to animate the hands, body, eyes and keyboard. Motion stays facing you; drag to turn it. Pause freezes the pose and lets the renderer sleep. The character is bundled offline and appears in both preview and calibrated Portrait output without importing a model.
 
-For a custom web scene, replace `createScene()` in `src/scene.ts`, keeping its `{ scene, content }` return contract, and rebuild. Put dynamic updates in the scheduler callback in `src/main.ts`; update the scene once before all views. Set animation only when needed, or call `scheduler.invalidate()` after a scene change. Your Three.js geometry, materials and shaders run directly in WebKit. DOM/CSS overlays do not become holograms.
+The body is a closed curved mesh, and the eyes follow its surface as it moves. The floor shadow uses one analytical transparent mesh, keeping the softness in every light-field view without shadow maps or per-frame blur work.
+
+To project it, select **Purple triangle · Working**, choose **Calibrated hologram**, then **Start output** after connecting the display and importing its calibration. The same live Three.js character is rendered from every light-field camera; this is not a flat sprite or a video. The scene selection and motion preference are saved by the native app.
+
+The **Scene** menu also offers the original Orbital study. You can load a **self-contained, uncompressed `.glb` under 64 MB**. Draco, KTX2 and Meshopt decoders are not bundled; external model resources are not supported. Imported model animation clips are not played; Play motion turns the model. Selecting a built-in scene leaves the imported model; Reset scene restores the paused purple triangle.
+
+For a custom web scene, replace `createScene()` in `src/scene.ts`, keeping its `{ scene, content, update(seconds) }` return contract, and rebuild. Put dynamic updates in `update`; the scheduler calls it once before all views, using a clock that stops when paused, hidden or suspended. Set animation only when needed, or call `scheduler.invalidate()` after a scene change. Your Three.js geometry, materials and shaders run directly in WebKit. DOM/CSS overlays do not become holograms.
 
 For integration into another Three.js application, `src/renderer.ts` exposes the renderer independently:
 
@@ -79,7 +85,7 @@ No USB resets, power cycling, firmware writes, mode/refresh-rate flapping or aut
 
 ## Validation
 
-`npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps.
+`npm test` checks calibration parsing/rejection, the optical parameter conversion, every off-axis camera's convergence, frame coalescing, idle/suspend/dispose and animation caps. Character tests check the original typing poses, continuous looping, key and paw motion, fixed geometry allocations, framing bounds and disposal of shared resources.
 
 `tests/browser-check.ts` renders synthetic view-coded quilts and compares real GPU output pixels with an independent CPU optical calculation for every quality profile. Readbacks exist only in this test. Run with browser-harness while the dev server is open:
 
