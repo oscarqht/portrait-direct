@@ -5,7 +5,7 @@ APP="$PWD/build/Portrait Direct.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/web"
 cp dist/app.js dist/style.css "$APP/Contents/Resources/web/"
 cat > "$APP/Contents/Resources/web/index.html" <<'HTML'
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self' portrait: blob: data:; script-src 'self' portrait:; style-src 'self' portrait: 'unsafe-inline'; connect-src 'self' portrait: blob: data:; img-src 'self' portrait: blob: data:;"><title>Portrait Direct</title><link rel="stylesheet" href="style.css"></head><body><div id="app"></div><script src="app.js"></script></body></html>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'self' portrait: blob: data:; script-src 'self' portrait:; worker-src 'self' blob: portrait:; style-src 'self' portrait: 'unsafe-inline'; connect-src 'self' portrait: blob: data:; img-src 'self' portrait: blob: data:;"><title>Portrait Direct</title><link rel="stylesheet" href="style.css"></head><body><div id="app"></div><script src="app.js"></script></body></html>
 HTML
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
