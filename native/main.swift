@@ -12,8 +12,9 @@ final class Resources: NSObject, WKURLSchemeHandler {
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         guard let url = task.request.url, url.host == "app" else { task.didFailWithError(URLError(.badURL)); return }
         let path = url.path == "/" ? "/index.html" : url.path
-        let file = path == "/model.glb" ? model : root.appendingPathComponent(String(path.dropFirst())).standardizedFileURL
-        guard let file = file, (path == "/model.glb" || file.path.hasPrefix(root.path + "/")),
+        let isModel = ["/model.glb", "/model.stl", "/model.3mf"].contains(path)
+        let file = isModel ? model : root.appendingPathComponent(String(path.dropFirst())).standardizedFileURL
+        guard let file = file, (isModel || file.path.hasPrefix(root.path + "/")),
               let data = try? Data(contentsOf: file) else { task.didFailWithError(URLError(.fileDoesNotExist)); return }
         let mime: String
         switch file.pathExtension {
@@ -21,6 +22,8 @@ final class Resources: NSObject, WKURLSchemeHandler {
         case "js": mime = "application/javascript"
         case "css": mime = "text/css"
         case "glb": mime = "model/gltf-binary"
+        case "stl": mime = "model/stl"
+        case "3mf": mime = "model/3mf"
         case "json": mime = "application/json"
         default: mime = "application/octet-stream"
         }
@@ -54,12 +57,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
         if let data = try? Data(contentsOf: support.appendingPathComponent("settings.json")),
            let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any] { settings = saved }
-        let model = support.appendingPathComponent("model.glb")
+        let savedExtension = (settings["modelUrl"] as? String).flatMap { URL(string: $0)?.pathExtension.lowercased() } ?? "glb"
+        let modelExtension = ["glb", "stl", "3mf"].contains(savedExtension) ? savedExtension : "glb"
+        let model = support.appendingPathComponent("model.\(modelExtension)")
         if FileManager.default.fileExists(atPath: model.path) { resources.model = model }
         else { settings.removeValue(forKey: "modelUrl"); settings.removeValue(forKey: "modelName") }
         if testPath != nil, let index = CommandLine.arguments.firstIndex(of: "--model-check"), CommandLine.arguments.count > index+1 {
             resources.model = URL(fileURLWithPath: CommandLine.arguments[index+1])
-            settings["modelUrl"] = "portrait://app/model.glb"; settings["modelName"] = "Synthetic GLB test"; settings["animate"] = false
+            settings["modelUrl"] = "portrait://app/model.\(resources.model!.pathExtension.lowercased())"; settings["modelName"] = resources.model!.lastPathComponent; settings["animate"] = false
         }
         control = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 940), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         control.title = "Portrait Direct"; control.minSize = NSSize(width: 820, height: 720)
@@ -215,18 +220,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKScriptMessageHandler
         }
     }
     func importModel() {
-        let panel = NSOpenPanel(); panel.allowedContentTypes = [UTType(filenameExtension: "glb") ?? .data]
-        panel.message = "Choose an uncompressed, self-contained GLB under 64 MB. It will be copied into this app’s local data folder."
+        let panel = NSOpenPanel(); panel.allowedContentTypes = ["glb", "stl", "3mf"].compactMap { UTType(filenameExtension: $0) }
+        panel.message = "Choose a self-contained GLB, STL or 3MF under 64 MB. GLB must be uncompressed. It will be copied into this app’s local data folder."
         panel.beginSheetModal(for: control) { [weak self] response in
             guard let self = self, response == .OK, let url = panel.url else { return }
             do {
                 let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                guard size <= 64*1024*1024 else { throw NSError(domain: "Portrait", code: 1, userInfo: [NSLocalizedDescriptionKey: "Choose a GLB under 64 MB."]) }
-                let data = try Data(contentsOf: url); let target = self.support.appendingPathComponent("model.glb")
+                guard size <= 64*1024*1024 else { throw NSError(domain: "Portrait", code: 1, userInfo: [NSLocalizedDescriptionKey: "Choose a GLB, STL or 3MF under 64 MB."]) }
+                let modelExtension = url.pathExtension.lowercased()
+                guard ["glb", "stl", "3mf"].contains(modelExtension) else { throw NSError(domain: "Portrait", code: 1, userInfo: [NSLocalizedDescriptionKey: "Choose a GLB, STL or 3MF model."]) }
+                let data = try Data(contentsOf: url); let target = self.support.appendingPathComponent("model.\(modelExtension)")
                 try data.write(to: target, options: .atomic); self.resources.model = target
                 // A stable local URL; reset the loader even when replacing an existing file.
                 self.settings.removeValue(forKey: "modelUrl"); self.settings.removeValue(forKey: "modelName"); self.broadcast()
-                self.emit(["type": "model", "url": "portrait://app/model.glb", "name": url.lastPathComponent], to: self.controlView)
+                self.emit(["type": "model", "url": "portrait://app/model.\(modelExtension)", "name": url.lastPathComponent], to: self.controlView)
                 self.log("Model imported: \(url.lastPathComponent)")
             } catch { self.message = error.localizedDescription; self.broadcast() }
         }

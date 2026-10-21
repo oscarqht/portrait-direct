@@ -1,6 +1,6 @@
 import './style.css';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { loadImportedModel, modelFormat } from './model';
 import { parseCalibration, profiles, type Calibration, type Profile } from './calibration';
 import { PortraitRenderer, type OutputMode } from './renderer';
 import { FrameScheduler } from './scheduler';
@@ -22,7 +22,6 @@ let scheduler:FrameScheduler|undefined;
 let sceneState:ReturnType<typeof createScene>|undefined;
 let modelToken=0, loadedModel:string|undefined, loadedScene:SceneKind='triangle', frameTotal=0, previousTime:number|undefined;
 let animationTime=0, fatal=false;
-const loader=new GLTFLoader();
 const channel=!native && 'BroadcastChannel' in window?new BroadcastChannel('portrait-direct'):null;
 
 function send(data:unknown) { window.webkit?.messageHandlers.portrait.postMessage(data); }
@@ -31,10 +30,10 @@ function sanitize(raw:Partial<Settings>):Settings {
     profile: raw.profile && profiles[raw.profile]?raw.profile:'balanced', animate:raw.animate===true,
     mode: raw.mode && ['hologram','quilt','test'].includes(raw.mode)?raw.mode:'hologram',
     scene:raw.scene==='orbital'||raw.scene==='furry'||raw.scene==='glass'?raw.scene:'triangle',
-    zoom:typeof raw.zoom==='number'?Math.min(1.5,Math.max(0.65,raw.zoom)):1,
+    zoom:typeof raw.zoom==='number'&&Number.isFinite(raw.zoom)?Math.min(3,Math.max(0.5,raw.zoom)):1,
     yaw:typeof raw.yaw==='number'&&Number.isFinite(raw.yaw)?raw.yaw:0,
     calibration:raw.calibration?parseCalibration(raw.calibration):null,
-    modelUrl:typeof raw.modelUrl==='string'&&(raw.modelUrl.startsWith('blob:')||raw.modelUrl==='portrait://app/model.glb')?raw.modelUrl:undefined,
+    modelUrl:typeof raw.modelUrl==='string'&&(raw.modelUrl.startsWith('blob:')||/^portrait:\/\/app\/model\.(glb|stl|3mf)$/.test(raw.modelUrl))?raw.modelUrl:undefined,
     modelName:typeof raw.modelName==='string'?raw.modelName:undefined,
   };
 }
@@ -105,15 +104,12 @@ async function loadModel(url?:string) {
     return;
   }
   try {
-    const result=await loader.loadAsync(url);
-    if(token!==modelToken) { disposeObject(result.scene); return; }
-    const box=new THREE.Box3().setFromObject(result.scene), size=box.getSize(new THREE.Vector3()), center=box.getCenter(new THREE.Vector3());
-    if(!Number.isFinite(size.length())||size.length()===0) throw new Error('The model has no renderable bounds.');
-    result.scene.position.sub(center); const fit=1.65/Math.max(size.x/0.75,size.y,size.z); result.scene.scale.setScalar(fit); result.scene.position.multiplyScalar(fit);
-    const group=new THREE.Group(); group.add(result.scene);
+    const model=await loadImportedModel(url,settings.modelName);
+    if(token!==modelToken) { disposeObject(model); return; }
+    const group=new THREE.Group(); group.add(model);
     disposeObject(sceneState.content); sceneState.scene.remove(sceneState.content);
     sceneState.content=group; sceneState.update=()=>{}; sceneState.setProfile=()=>{}; sceneState.scene.add(group); animationTime=0; previousTime=undefined; scheduler?.invalidate();
-  } catch(e) { report(`Could not load GLB: ${String(e)}. Use an uncompressed, self-contained .glb.`); }
+  } catch(e) { if(token===modelToken) report(`Could not load model: ${String(e)}. Use a self-contained GLB, STL or 3MF; compressed GLB requires decoders that are not bundled.`); }
 }
 
 if(output) {
@@ -138,10 +134,10 @@ if(output) {
         <div class="cal-status" id="cal-status">Calibration needed for 3D output</div>
       </section>
       <section class="panel"><div class="section-label"><span>02</span><h2>Make it yours</h2></div>
-        <label for="scene">Scene</label><select id="scene"><option value="triangle">Purple triangle · Working</option><option value="furry">Furry triangle · Working</option><option value="glass">Liquid glass triangle · Working</option><option value="orbital">Orbital study</option><option value="model" disabled>Imported GLB model</option></select>
+        <label for="scene">Scene</label><select id="scene"><option value="triangle">Purple triangle · Working</option><option value="furry">Furry triangle · Working</option><option value="glass">Liquid glass triangle · Working</option><option value="orbital">Orbital study</option><option value="model" disabled>Imported model</option></select>
         <div class="quality" role="group" aria-label="Rendering quality"><button data-profile="eco">Eco</button><button data-profile="balanced">Balanced</button><button data-profile="detail">Detail</button></div><p class="hint" id="quality-hint"></p>
-        <label for="zoom">Framing <output id="zoom-value">100%</output></label><input id="zoom" type="range" min="0.65" max="1.5" step="0.01" value="1">
-        <div class="button-row"><button id="model" class="secondary">Open GLB model</button><button id="reset" class="text-button">Reset scene</button></div><input id="model-file" type="file" accept=".glb" hidden>
+        <label for="zoom">Framing <output id="zoom-value">100%</output></label><input id="zoom" type="range" min="0.5" max="3" step="0.01" value="1">
+        <div class="button-row"><button id="model" class="secondary">Open 3D model</button><button id="reset" class="text-button">Reset scene</button></div><input id="model-file" type="file" accept=".glb,.stl,.3mf" hidden>
       </section>
       <section class="panel"><div class="section-label"><span>03</span><h2>Send to the glass</h2></div><label for="mode">Output</label><select id="mode"><option value="hologram">Calibrated hologram</option><option value="quilt">Quilt inspection</option><option value="test">Static connection test</option></select>
         <button id="present" class="primary full" disabled>Start output <span>↗</span></button><p class="hint" id="output-hint">A connected Portrait and its calibration unlock output.</p>
@@ -165,8 +161,9 @@ if(output) {
   document.querySelector('#mode')!.addEventListener('change',e=>update({mode:(e.target as HTMLSelectElement).value as OutputMode}));
   document.querySelector('#model')!.addEventListener('click',()=>native?send({type:'importModel'}):(document.querySelector('#model-file') as HTMLInputElement).click());
   document.querySelector('#model-file')!.addEventListener('change',e=>{
-    const file=(e.target as HTMLInputElement).files?.[0]; if(!file)return;
-    if(file.size>64*1024*1024){report('Choose a self-contained GLB under 64 MB.');return;}
+    const input=e.target as HTMLInputElement, file=input.files?.[0]; input.value=''; if(!file)return;
+    try { modelFormat(file.name); } catch(error) { report(String(error)); return; }
+    if(file.size>64*1024*1024){report('Choose a self-contained GLB, STL or 3MF under 64 MB.');return;}
     if(settings.modelUrl?.startsWith('blob:')) URL.revokeObjectURL(settings.modelUrl);
     update({modelUrl:URL.createObjectURL(file),modelName:file.name});
   });
